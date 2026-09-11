@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets
+.env
+
+# Test/debug artifacts (spike logs, docker log dumps, test TTS output)
+*.wav
+*.jsonl
+*.log
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
