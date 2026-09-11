@@ -1,0 +1,7 @@
+# Piper voice per persona -- the one thing OWUI has no concept of.
+# Personas themselves (display name, model, system prompt, tools) are
+# discovered dynamically from OWUI's own model list; see
+# switchboard/profiles.py and docs/design.md Section 3.
+default_voice: "en_US-lessac-medium"     # 22050 Hz -- used for any persona without an override below
+overrides:
+  phil: "en_GB-alan-low"                 # confirmed real voice, 16000 Hz

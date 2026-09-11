@@ -1,0 +1,16 @@
+# Assumes whisper/piper/open-webui already run elsewhere on the same host
+# or LAN (docs/design.md: Gateway is Docker, ESP32 + services on the same
+# LAN) -- this only defines the Gateway container itself.
+services:
+  gateway:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      SWITCHBOARD_OWUI_BASE_URL: "http://host.docker.internal:3000"
+      SWITCHBOARD_OWUI_EMAIL: ""
+      SWITCHBOARD_OWUI_PASSWORD: ""
+      SWITCHBOARD_WHISPER_URI: "tcp://host.docker.internal:10300"
+      SWITCHBOARD_PIPER_URI: "tcp://host.docker.internal:10200"
+    volumes:
+      - ./config:/app/config
