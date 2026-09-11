@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Switchboard — Virtual Device</title>
+<style>
+  body { font-family: sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+  #personas { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  #personas button { padding: 8px 16px; }
+  #personas button.selected { background: #333; color: white; }
+  #talk {
+    width: 100%; padding: 24px; font-size: 18px; margin-bottom: 8px;
+    background: #ddd; border: none; border-radius: 8px;
+  }
+  #talk.listening { background: #f66; color: white; }
+  #talk:disabled { opacity: 0.4; }
+  #cancel {
+    width: 100%; padding: 12px; font-size: 14px; margin-bottom: 16px;
+    background: #eee; border: none; border-radius: 8px; display: none;
+  }
+  #cancel.visible { display: block; }
+  #status { color: #666; margin-bottom: 8px; }
+  #transcript, #llm_text { padding: 8px; border-left: 3px solid #ccc; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+  <h2>Switchboard — Virtual Device</h2>
+  <div id="personas"></div>
+  <button id="talk" disabled>Select a persona, then tap to talk</button>
+  <button id="cancel">Cancel</button>
+  <div id="status">disconnected</div>
+  <div id="transcript"></div>
+  <div id="llm_text"></div>
+  <script src="app.js"></script>
+</body>
+</html>
