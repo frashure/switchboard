@@ -66,6 +66,8 @@ static bool is_idle_state(const char *state) {
  * conflating "what the UI displays" with "what the actual state is"
  * (the capturing/listening naming-collision bug); same trap here. */
 static bool g_session_idle = true;
+/* True while the answer is being spoken: the big button then stops it. */
+static bool g_speaking = false;
 
 /* Builds a circular avatar: the real image if available, else a
  * monogram (first letter of the name) on an accent-colored circle --
@@ -125,7 +127,11 @@ static void persona_card_cb(lv_event_t *e) {
 static void talk_btn_cb(lv_event_t *e) {
     (void)e;
     if (strlen(selected_persona) == 0) return;
-    EM_ASM({ window.simStartTalking(); });
+    if (g_speaking) {
+        EM_ASM({ window.simCancel(); });
+    } else {
+        EM_ASM({ window.simStartTalking(); });
+    }
 }
 
 static void cancel_btn_cb(lv_event_t *e) {
@@ -195,6 +201,7 @@ void sim_set_status(const char *state, const char *detail) {
     bool idle = is_idle_state(state);
     bool capturing = strcmp(state, "capturing") == 0;
     g_session_idle = idle;
+    g_speaking = strcmp(state, "speaking") == 0;
 
     if (idle) {
         lv_obj_set_style_bg_color(talk_btn, COLOR_ACCENT, 0);
@@ -203,12 +210,17 @@ void sim_set_status(const char *state, const char *detail) {
     } else if (capturing) {
         lv_obj_set_style_bg_color(talk_btn, COLOR_RECORDING, 0);
         lv_obj_add_state(talk_btn, LV_STATE_DISABLED);
+    } else if (g_speaking) {
+        lv_obj_set_style_bg_color(talk_btn, COLOR_ACCENT, 0);
+        lv_obj_remove_state(talk_btn, LV_STATE_DISABLED);
     } else {
         lv_obj_add_state(talk_btn, LV_STATE_DISABLED);
     }
 
     if (capturing) {
         lv_label_set_text(talk_label, "Listening...");
+    } else if (g_speaking) {
+        lv_label_set_text(talk_label, "Tap to stop");
     } else if (idle) {
         lv_label_set_text(talk_label, "Tap to talk");
     } else {

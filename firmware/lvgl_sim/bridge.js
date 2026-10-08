@@ -87,19 +87,22 @@ function handleControl(msg) {
       audioChunks = [];
       break;
     case "done":
+      // The Gateway is finished once the audio is delivered, but playback
+      // runs on for as long as the answer is -- the UI stays in "speaking"
+      // (with Cancel / tap-to-stop available) until it actually ends.
       if (pendingAudioHeader && audioChunks.length) {
         const { sample_rate, bits, channels } = pendingAudioHeader;
         playPCM(concatArrayBuffers(audioChunks), sample_rate, bits, channels);
+        setStatus("speaking", "");
+      } else {
+        setStatus("ready", "");
       }
       pendingAudioHeader = null;
       audioChunks = [];
-      setStatus("ready", "");
       break;
     case "stop_audio":
-      if (currentAudioSource) {
-        currentAudioSource.stop();
-        currentAudioSource = null;
-      }
+      stopPlayback();
+      setStatus("ready", "");
       break;
   }
 }
@@ -132,10 +135,23 @@ function playPCM(arrayBuffer, sampleRate, bits, channels) {
   source.buffer = buffer;
   source.connect(audioContext.destination);
   source.onended = () => {
-    if (currentAudioSource === source) currentAudioSource = null;
+    // Only a natural end counts: stopPlayback() clears currentAudioSource
+    // first, so a cancelled source's late onended can't flip the UI back to
+    // "ready" in the middle of the next turn.
+    if (currentAudioSource === source) {
+      currentAudioSource = null;
+      setStatus("ready", "");
+    }
   };
   currentAudioSource = source;
   source.start();
+}
+
+function stopPlayback() {
+  const source = currentAudioSource;
+  currentAudioSource = null;
+  if (source) source.stop();
+  return source !== null;
 }
 
 // Decodes a persona's avatar (data: URI from OWUI, any format the browser
@@ -280,6 +296,10 @@ window.simStartTalking = function () {
 
 window.simCancel = function () {
   stopMic();
+  // Stop local playback directly -- by the time the user is listening to
+  // an answer the Gateway has already delivered all of it, so there is
+  // nothing server-side left to cancel (and the WS may be down anyway).
+  if (stopPlayback()) setStatus("ready", "");
   send(JSON.stringify({ type: "cancel" }));
 };
 

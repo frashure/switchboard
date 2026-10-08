@@ -76,21 +76,24 @@ function handleControl(msg) {
       audioChunks = [];
       break;
     case "done":
+      // The Gateway is done once audio is delivered, but playback runs on
+      // for as long as the answer is -- stay in "speaking" (Cancel visible)
+      // until it actually ends.
       if (pendingAudioHeader && audioChunks.length) {
         const { sample_rate, bits, channels } = pendingAudioHeader;
         playPCM(concatArrayBuffers(audioChunks), sample_rate, bits, channels);
+        updateButtons("speaking");
+      } else {
+        updateButtons("ready");
       }
       pendingAudioHeader = null;
       audioChunks = [];
-      updateButtons("ready");
       break;
     case "stop_audio":
       // cancel() sent server-side after TTS audio was already delivered --
       // the server can't un-send it, so stop local playback instead.
-      if (currentAudioSource) {
-        currentAudioSource.stop();
-        currentAudioSource = null;
-      }
+      stopPlayback();
+      updateButtons("ready");
       break;
   }
 }
@@ -147,10 +150,23 @@ function playPCM(arrayBuffer, sampleRate, bits, channels) {
   source.buffer = buffer;
   source.connect(audioContext.destination);
   source.onended = () => {
-    if (currentAudioSource === source) currentAudioSource = null;
+    // Only a natural end counts -- stopPlayback() clears currentAudioSource
+    // first, so a cancelled source's late onended can't reset the UI
+    // mid-way through the next turn.
+    if (currentAudioSource === source) {
+      currentAudioSource = null;
+      updateButtons("ready");
+    }
   };
   currentAudioSource = source;
   source.start();
+}
+
+function stopPlayback() {
+  const source = currentAudioSource;
+  currentAudioSource = null;
+  if (source) source.stop();
+  return source !== null;
 }
 
 async function loadPersonas() {
@@ -241,6 +257,9 @@ function stopMic() {
 
 function cancelTurn() {
   stopMic();
+  // The Gateway has already delivered the whole answer by the time it is
+  // playing, so stop it locally rather than relying on a server message.
+  if (stopPlayback()) updateButtons("ready");
   ws.send(JSON.stringify({ type: "cancel" }));
 }
 
