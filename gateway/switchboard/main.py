@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from switchboard.config import settings
 from switchboard.llm.owui_client import OwuiClient
@@ -18,9 +19,11 @@ owui = OwuiClient()
 
 async def ensure_profiles_loaded() -> None:
     """Personas are discovered from OWUI's model list -- lazy-refresh if
-    empty (startup discovery failed, or this is literally the first use),
-    mirroring OwuiClient's own lazy-connect pattern."""
-    if profiles.is_empty():
+    empty (startup discovery failed, or this is literally the first use,
+    mirroring OwuiClient's own lazy-connect pattern) or stale (periodic
+    safety net so a newly-added OWUI persona shows up without a Gateway
+    restart -- see ProfileRegistry.REFRESH_INTERVAL_S)."""
+    if profiles.needs_refresh():
         try:
             await profiles.refresh(owui)
         except Exception:
@@ -61,10 +64,15 @@ app.add_middleware(
 @app.get("/profiles")
 async def list_profiles() -> dict:
     await ensure_profiles_loaded()
-    return {"personas": profiles.list_ids()}
+    return {"personas": profiles.list_summaries()}
 
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket) -> None:
     await ensure_profiles_loaded()
     await handle_connection(websocket, profiles, owui)
+
+
+# Registered last: a mount at "/" would otherwise shadow the routes above.
+if settings.static_dir is not None and settings.static_dir.is_dir():
+    app.mount("/", StaticFiles(directory=settings.static_dir, html=True), name="client")

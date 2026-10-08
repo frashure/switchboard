@@ -44,6 +44,9 @@ class Emitter:
     async def audio(self, pcm: bytes, rate: int, width: int, channels: int) -> None:
         raise NotImplementedError
 
+    async def stop_audio(self) -> None:
+        raise NotImplementedError
+
     async def done(self) -> None:
         raise NotImplementedError
 
@@ -64,6 +67,12 @@ class Session:
 
         self._ring = RingBuffer(max_bytes=int(settings.vad_max_utterance_s * RATE * WIDTH * CHANNELS))
         self._vad = EndOfSpeechDetector()
+        # The turn (STT->LLM->TTS) running as a cancellable background task,
+        # so the WS receive loop (server/ws.py) stays free to process a
+        # `cancel` message concurrently instead of being blocked on it --
+        # previously a cancel sent during "thinking"/"speaking" just queued
+        # silently until the turn finished on its own, not a real interrupt.
+        self._turn_task: Optional[asyncio.Task] = None
 
     async def select_persona(self, persona_id: str) -> None:
         self._profile = self._profiles.get(persona_id)
@@ -90,23 +99,44 @@ class Session:
         # handling and was observed to cause the LLM step to hang afterward.
         end_of_speech = await asyncio.to_thread(self._vad.process, chunk)
         if end_of_speech:
-            await self._finish_capture(reason="vad")
+            self._turn_task = asyncio.create_task(self._finish_capture(reason="vad"))
         elif not still_room:
-            await self._finish_capture(reason="max_duration")
+            self._turn_task = asyncio.create_task(self._finish_capture(reason="max_duration"))
 
     async def talk_end(self) -> None:
         if self.state != SessionState.CAPTURE:
             return
+        self._turn_task = asyncio.create_task(self._talk_end_grace_then_finish())
+
+    async def _talk_end_grace_then_finish(self) -> None:
         # talk_end is a hint/cancel-safety, not the sole end-of-turn signal
         # (docs/protocol.md) -- give the VAD a brief grace period to catch
-        # the trailing pause on its own before forcing the cut.
+        # the trailing pause on its own before forcing the cut. Run as part
+        # of the cancellable turn task (see __init__) so a cancel sent during
+        # this sleep is also honored immediately rather than waiting it out.
         await asyncio.sleep(settings.vad_pause_threshold_ms / 1000)
         if self.state == SessionState.CAPTURE:
             await self._finish_capture(reason="talk_end_fallback")
 
     async def cancel(self) -> None:
         self._ring.clear()
+        if self._turn_task is not None and not self._turn_task.done():
+            self._turn_task.cancel()
+            try:
+                await self._turn_task
+            except asyncio.CancelledError:
+                pass
+        self._turn_task = None
+        # Note: cancellation stops us from *waiting on or acting on* the
+        # in-flight turn -- it can't forcibly abort a synchronous network
+        # call already dispatched to a worker thread (owui_client.py uses
+        # asyncio.to_thread for httpx), so OWUI may keep generating in the
+        # background regardless (matches what we already know happens even
+        # on an ordinary disconnect -- see docs/protocol.md).
+        was_playing = self.state == SessionState.PLAY
         self.state = SessionState.READY if self._profile else SessionState.IDLE
+        if was_playing:
+            await self._emit.stop_audio()
         await self._emit.status("done")
 
     async def _set_chat_title(self, chat_id: str, title: str) -> None:
@@ -117,8 +147,9 @@ class Session:
 
     async def _thinking_heartbeat(self) -> None:
         """Keep re-emitting a status while waiting on the LLM turn, which can
-        take up to ~2 minutes worst-case (owui_client.py REST fallback). A
-        real turn silently exceeded 60s with zero traffic on the WS and the
+        take up to ~8 minutes worst-case (owui_client.py REST fallback,
+        settings.llm_rest_poll_timeout). A real turn silently exceeded 60s
+        with zero traffic on the WS and the
         browser's connection was found disconnected by the time the answer
         was ready -- likely idle-connection handling on the browser/OS side."""
         try:
@@ -152,8 +183,9 @@ class Session:
         try:
             # send_turn manages its own internal timeout budget, including
             # a REST-based recovery path if the socket delivery is flaky --
-            # see owui_client.py. That path can take up to ~120s worst case;
-            # the heartbeat above keeps the WS connection alive during long
+            # see owui_client.py. That path can take up to ~8 minutes worst
+            # case (multi-tool-call turns); the heartbeat above keeps the
+            # WS connection alive during long
             # waits -- a real turn silently took over 60s once and the
             # browser's connection was found disconnected by the time the
             # answer was ready, even though generation succeeded server-side.

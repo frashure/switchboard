@@ -5,3 +5,5 @@
 default_voice: "en_US-lessac-medium"     # 22050 Hz -- used for any persona without an override below
 overrides:
   phil: "en_GB-alan-low"                 # confirmed real voice, 16000 Hz
+  aida: "en_GB-alba-medium"
+  libby: "en_GB-alba-medium"

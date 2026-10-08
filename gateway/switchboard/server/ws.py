@@ -58,6 +58,12 @@ class WebSocketEmitter(Emitter):
         except Exception:
             logger.warning("Failed to send audio bytes -- connection likely already closed")
 
+    async def stop_audio(self) -> None:
+        # Only meaningful if TTS audio was already sent before cancel()
+        # caught up with it -- the server can't un-send bytes already on
+        # the wire, so this just tells the client to stop playback.
+        await self._send_json({"type": "stop_audio"})
+
     async def done(self) -> None:
         await self._send_json({"type": "done"})
 

@@ -35,9 +35,15 @@ from switchboard.config import settings
 from switchboard.profiles import Profile
 
 
+# Minimum gap between login attempt bursts after a failure -- see connect().
+LOGIN_COOLDOWN_S = 20
+
+
 class OwuiClient:
     def __init__(self):
         self._token: str | None = None
+        self._last_login_failure: float = float("-inf")
+        self._last_login_error: str = ""
 
     async def connect(self) -> None:
         # Observed repeatedly in this dev environment: the login call fails
@@ -48,6 +54,17 @@ class OwuiClient:
         # before and after. Looks like environment-specific network setup
         # settling right at process start, not an application bug -- retry
         # generously rather than failing app startup outright.
+        # Cooldown after a failed login: with no token, every incoming
+        # request calls connect() again, so an unreachable/rejecting OWUI
+        # would otherwise be hammered once per request -- which also trips
+        # OWUI's own sign-in rate limit (429) and keeps it tripped.
+        since_failure = time.monotonic() - self._last_login_failure
+        if since_failure < LOGIN_COOLDOWN_S:
+            raise RuntimeError(
+                f"OWUI login failed {since_failure:.0f}s ago; not retrying for "
+                f"{LOGIN_COOLDOWN_S - since_failure:.0f}s more ({self._last_login_error})"
+            )
+
         last_error = None
         attempts = 10
         for attempt in range(attempts):
@@ -61,10 +78,19 @@ class OwuiClient:
                 r.raise_for_status()
                 self._token = r.json()["token"]
                 return
+            except httpx.HTTPStatusError as e:
+                # 4xx (bad credentials, rate-limited) won't fix itself within
+                # seconds -- retrying only makes a 429 worse. 5xx is transient.
+                last_error = e
+                if e.response.status_code < 500:
+                    break
+                await asyncio.sleep(3)
             except httpx.HTTPError as e:
                 last_error = e
                 await asyncio.sleep(3)
-        raise RuntimeError(f"Could not log in to OWUI after {attempts} attempts: {last_error}")
+        self._last_login_failure = time.monotonic()
+        self._last_login_error = str(last_error)
+        raise RuntimeError(f"Could not log in to OWUI: {last_error}")
 
     async def list_models(self) -> list[dict]:
         """GET /api/models -- confirmed: returns {"data": [...]}, each model
@@ -82,6 +108,29 @@ class OwuiClient:
 
         data = await asyncio.to_thread(_get)
         return data.get("data", [])
+
+    async def get_model_avatar(self, model_id: str) -> str | None:
+        """GET /api/v1/models/model?id=<id> -- confirmed: this per-model
+        endpoint (unlike the bulk /api/models used by list_models) includes
+        meta.profile_image_url, a data: URI (base64) of whatever avatar was
+        set for the persona in OWUI's admin UI. Returns None if the model
+        has no avatar configured or the field is missing."""
+        if self._token is None:
+            await self.connect()
+        headers = {"Authorization": f"Bearer {self._token}"}
+
+        def _get() -> dict:
+            r = httpx.get(
+                f"{settings.owui_base_url}/api/v1/models/model",
+                params={"id": model_id},
+                headers=headers,
+                timeout=10,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        data = await asyncio.to_thread(_get)
+        return data.get("meta", {}).get("profile_image_url") or None
 
     async def delete_chat(self, chat_id: str) -> None:
         """DELETE /api/v1/chats/{chat_id} -- REST convention inferred from
@@ -257,11 +306,15 @@ class OwuiClient:
 
         previous_length = -1
         stable_count = 0
+        poll_interval_s = 2
         # Long, elaborate answers (essay-style, several thousand characters)
         # have been observed still actively growing past 60s of generation
         # -- confirmed via REST, not stalled, just genuinely slow for long
-        # responses. 90 * 2s = 180s budget to accommodate that.
-        for _ in range(90):
+        # responses. Multi-tool-call turns (each tool round-trip re-invokes
+        # the model) have been observed taking even longer. Budget is
+        # configurable via settings.llm_rest_poll_timeout.
+        max_polls = int(settings.llm_rest_poll_timeout / poll_interval_s)
+        for _ in range(max_polls):
             data = await asyncio.to_thread(_get)
             history = data.get("chat", {}).get("history", {})
             current_id = history.get("currentId")
@@ -274,6 +327,6 @@ class OwuiClient:
             else:
                 stable_count = 0
             previous_length = len(content)
-            await asyncio.sleep(2)
+            await asyncio.sleep(poll_interval_s)
 
         raise RuntimeError(f"Could not recover a stable final text for chat_id={chat_id} via REST polling")
