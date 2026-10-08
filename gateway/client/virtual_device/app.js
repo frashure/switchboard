@@ -4,13 +4,19 @@
 // stopped talking (no hold-to-talk, no manual "I'm done" signal needed).
 // A separate Cancel button aborts the current turn.
 //
-// Serve this folder with any static file server (the Gateway itself
-// doesn't serve static files in M1), e.g.:
+// Served by the Gateway itself when SWITCHBOARD_STATIC_DIR is set. In dev
+// it can also be served separately:
 //   python -m http.server 8001 --directory client/virtual_device
-// then open http://localhost:8001/ while the Gateway runs on :8090.
+// then open http://localhost:8001/?gateway=localhost:8090
 
-const GATEWAY_HTTP = "http://localhost:8090";
-const GATEWAY_WS = "ws://localhost:8090/ws";
+// Same origin as the page by default (the Gateway serves this client in
+// the deployed setup); ?gateway=host:port overrides for a separate static
+// server in dev. Scheme follows the page's so HTTPS pages get wss://.
+const params = new URLSearchParams(window.location.search);
+const secure = window.location.protocol === "https:";
+const gatewayHost = params.get("gateway") || window.location.host;
+const GATEWAY_HTTP = `${secure ? "https" : "http"}://${gatewayHost}`;
+const GATEWAY_WS = `${secure ? "wss" : "ws"}://${gatewayHost}/ws`;
 
 const personasEl = document.getElementById("personas");
 const talkEl = document.getElementById("talk");
@@ -28,6 +34,7 @@ let workletNode;
 let pendingAudioHeader = null;
 let audioChunks = [];
 let talking = false;
+let currentAudioSource = null; // playing AudioBufferSourceNode, for stop_audio
 
 function connect() {
   ws = new WebSocket(GATEWAY_WS);
@@ -76,6 +83,14 @@ function handleControl(msg) {
       pendingAudioHeader = null;
       audioChunks = [];
       updateButtons("ready");
+      break;
+    case "stop_audio":
+      // cancel() sent server-side after TTS audio was already delivered --
+      // the server can't un-send it, so stop local playback instead.
+      if (currentAudioSource) {
+        currentAudioSource.stop();
+        currentAudioSource = null;
+      }
       break;
   }
 }
@@ -131,6 +146,10 @@ function playPCM(arrayBuffer, sampleRate, bits, channels) {
   const source = audioContext.createBufferSource();
   source.buffer = buffer;
   source.connect(audioContext.destination);
+  source.onended = () => {
+    if (currentAudioSource === source) currentAudioSource = null;
+  };
+  currentAudioSource = source;
   source.start();
 }
 
@@ -138,9 +157,15 @@ async function loadPersonas() {
   const res = await fetch(`${GATEWAY_HTTP}/profiles`);
   const { personas } = await res.json();
   personasEl.innerHTML = "";
-  for (const id of personas) {
+  for (const { id, avatar } of personas) {
     const btn = document.createElement("button");
-    btn.textContent = id;
+    if (avatar) {
+      const img = document.createElement("img");
+      img.src = avatar;
+      img.alt = id;
+      btn.appendChild(img);
+    }
+    btn.appendChild(document.createTextNode(id));
     btn.onclick = () => selectPersona(id, btn);
     personasEl.appendChild(btn);
   }
