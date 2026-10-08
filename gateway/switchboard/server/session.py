@@ -12,7 +12,7 @@ from switchboard.config import settings
 from switchboard.llm.owui_client import OwuiClient
 from switchboard.profiles import Profile, ProfileRegistry
 from switchboard.stt.whisper import transcribe
-from switchboard.text import strip_markdown
+from switchboard.text import split_for_speech, strip_markdown
 from switchboard.tts.piper import synthesize
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,10 @@ class Emitter:
     async def llm_text(self, text: str) -> None:
         raise NotImplementedError
 
-    async def audio(self, pcm: bytes, rate: int, width: int, channels: int) -> None:
+    async def audio_start(self, rate: int, width: int, channels: int) -> None:
+        raise NotImplementedError
+
+    async def audio_data(self, pcm: bytes) -> None:
         raise NotImplementedError
 
     async def stop_audio(self) -> None:
@@ -206,23 +209,34 @@ class Session:
             heartbeat.cancel()
         await self._emit.llm_text(final_text)
 
-        self.state = SessionState.PLAY
-        await self._emit.status("speaking")
+        # Synthesize and send the answer a chunk at a time, so the client can
+        # start playing after the first sentence instead of waiting for the
+        # whole answer to be synthesized (~0.2s per 100 characters, so a long
+        # answer used to mean seconds of silence after "speaking" appeared).
+        # "speaking" is only emitted once there is audio to play.
         try:
             # Strip markdown for speech only -- llm_text above still carries
             # the raw text in case a future display ever renders it.
-            speech_text = strip_markdown(final_text)
-            synthesized = await asyncio.wait_for(
-                synthesize(speech_text, self._profile.voice), timeout=settings.tts_timeout
-            )
-            await self._emit.audio(
-                synthesized.audio, synthesized.rate, synthesized.width, synthesized.channels
-            )
+            chunks = split_for_speech(strip_markdown(final_text))
+            started = False
+            for chunk in chunks:
+                synthesized = await asyncio.wait_for(
+                    synthesize(chunk, self._profile.voice), timeout=settings.tts_timeout
+                )
+                if not started:
+                    self.state = SessionState.PLAY
+                    await self._emit.status("speaking")
+                    await self._emit.audio_start(
+                        synthesized.rate, synthesized.width, synthesized.channels
+                    )
+                    started = True
+                await self._emit.audio_data(synthesized.audio)
         except Exception:
             logger.exception("TTS failed")
             await self._emit.status("error", detail="tts_failed")
-            # llm_text already reached the screen -- degrade gracefully rather
-            # than losing the turn entirely.
+            # llm_text already reached the screen (and any chunks already
+            # sent will still play) -- degrade gracefully rather than losing
+            # the turn entirely.
 
         self.state = SessionState.READY
         await self._emit.done()

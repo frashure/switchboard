@@ -45,13 +45,14 @@ class WebSocketEmitter(Emitter):
     # couldn't handle a multi-MB single frame either way.
     AUDIO_CHUNK_BYTES = 32 * 1024
 
-    async def audio(self, pcm: bytes, rate: int, width: int, channels: int) -> None:
-        # JSON header, followed by one or more binary frames, per
-        # docs/design.md Section 7 -- the client accumulates frames until
-        # `done` arrives rather than assuming exactly one frame.
+    async def audio_start(self, rate: int, width: int, channels: int) -> None:
+        # JSON header once per answer, then binary frames as each chunk is
+        # synthesized (docs/design.md Section 7); `done` marks the end.
         await self._send_json(
             {"type": "audio_header", "sample_rate": rate, "bits": width * 8, "channels": channels}
         )
+
+    async def audio_data(self, pcm: bytes) -> None:
         try:
             for i in range(0, len(pcm), self.AUDIO_CHUNK_BYTES):
                 await self._ws.send_bytes(pcm[i : i + self.AUDIO_CHUNK_BYTES])

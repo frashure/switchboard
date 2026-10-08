@@ -36,6 +36,9 @@ running the web client is the current path to a real device. See
   conversations continue in the same chat thread and show up in Open WebUI.
 - **Speech-friendly output.** Markdown is stripped before text-to-speech; the raw
   text is still sent to the screen.
+- **Streaming speech.** The answer is spoken sentence by sentence as it is
+  synthesized, so audio starts within about a second regardless of answer length.
+  Tap-to-stop interrupts it at any point.
 
 ## Repository layout
 
@@ -150,8 +153,6 @@ Settings are `SWITCHBOARD_*` environment variables or entries in `gateway/.env`
 ## Known limitations
 
 - Single device, one conversation at a time, trusted network, no authentication.
-- Long answers are synthesized in full before playback starts (sentence-level
-  streaming is a planned improvement).
 - Cancelling stops the Gateway from waiting on Open WebUI, but Open WebUI may
   keep generating in the background.
 - The compose stack and the on-tablet experience (touch input, speaker-to-mic

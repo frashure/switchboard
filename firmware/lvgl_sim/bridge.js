@@ -20,10 +20,15 @@ let audioContext;
 let micStream;
 let sourceNode;
 let workletNode;
-let pendingAudioHeader = null;
-let audioChunks = [];
+let audioFormat = null; // sample_rate/channels from the current answer's audio_header
 let talking = false;
-let currentAudioSource = null;
+// Streamed playback: the Gateway sends an answer's audio as it is
+// synthesized (a sentence or so at a time), so each binary frame is
+// scheduled to start exactly when the previous one ends instead of
+// waiting for the whole answer.
+const playingSources = new Set();
+let nextPlayTime = 0;
+let streamDone = false; // the Gateway has sent `done` for this answer
 
 function setStatus(state, detail) {
   Module.ccall("sim_set_status", null, ["string", "string"], [state, detail || ""]);
@@ -83,22 +88,17 @@ function handleControl(msg) {
       Module.ccall("sim_set_llm_text", null, ["string"], [msg.text]);
       break;
     case "audio_header":
-      pendingAudioHeader = msg;
-      audioChunks = [];
+      audioFormat = msg;
+      streamDone = false;
+      if (playingSources.size === 0) nextPlayTime = 0;
       break;
     case "done":
-      // The Gateway is finished once the audio is delivered, but playback
+      // The Gateway is finished once all audio is delivered, but playback
       // runs on for as long as the answer is -- the UI stays in "speaking"
       // (with Cancel / tap-to-stop available) until it actually ends.
-      if (pendingAudioHeader && audioChunks.length) {
-        const { sample_rate, bits, channels } = pendingAudioHeader;
-        playPCM(concatArrayBuffers(audioChunks), sample_rate, bits, channels);
-        setStatus("speaking", "");
-      } else {
-        setStatus("ready", "");
-      }
-      pendingAudioHeader = null;
-      audioChunks = [];
+      streamDone = true;
+      audioFormat = null;
+      if (playingSources.size === 0) setStatus("ready", "");
       break;
     case "stop_audio":
       stopPlayback();
@@ -108,25 +108,15 @@ function handleControl(msg) {
 }
 
 function handleIncomingAudio(arrayBuffer) {
-  if (!pendingAudioHeader) return;
-  audioChunks.push(arrayBuffer);
+  if (!audioFormat) return; // stale frame after cancel, or no header yet
+  enqueuePCM(arrayBuffer, audioFormat.sample_rate);
 }
 
-function concatArrayBuffers(buffers) {
-  const totalLength = buffers.reduce((sum, b) => sum + b.byteLength, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const b of buffers) {
-    result.set(new Uint8Array(b), offset);
-    offset += b.byteLength;
-  }
-  return result.buffer;
-}
-
-function playPCM(arrayBuffer, sampleRate, bits, channels) {
+function enqueuePCM(arrayBuffer, sampleRate) {
   if (!audioContext) audioContext = new AudioContext();
+  if (audioContext.state === "suspended") audioContext.resume();
   const int16 = new Int16Array(arrayBuffer);
-  const buffer = audioContext.createBuffer(channels, int16.length / channels, sampleRate);
+  const buffer = audioContext.createBuffer(1, int16.length, sampleRate);
   const channelData = buffer.getChannelData(0);
   for (let i = 0; i < int16.length; i++) {
     channelData[i] = int16[i] / 32768;
@@ -135,23 +125,33 @@ function playPCM(arrayBuffer, sampleRate, bits, channels) {
   source.buffer = buffer;
   source.connect(audioContext.destination);
   source.onended = () => {
-    // Only a natural end counts: stopPlayback() clears currentAudioSource
-    // first, so a cancelled source's late onended can't flip the UI back to
-    // "ready" in the middle of the next turn.
-    if (currentAudioSource === source) {
-      currentAudioSource = null;
-      setStatus("ready", "");
-    }
+    // stopPlayback() detaches this handler first, so a cancelled clip's
+    // late onended can't flip the UI back to "ready" mid-way through the
+    // next turn.
+    playingSources.delete(source);
+    if (streamDone && playingSources.size === 0) setStatus("ready", "");
   };
-  currentAudioSource = source;
-  source.start();
+  // Back-to-back with the previous frame; if the stream ever falls behind
+  // (next frame arrives after the previous one finished), restart with a
+  // small lead rather than scheduling in the past.
+  const startAt = Math.max(audioContext.currentTime + 0.05, nextPlayTime);
+  source.start(startAt);
+  nextPlayTime = startAt + buffer.duration;
+  playingSources.add(source);
 }
 
+// Returns true if anything was playing or still streaming in.
 function stopPlayback() {
-  const source = currentAudioSource;
-  currentAudioSource = null;
-  if (source) source.stop();
-  return source !== null;
+  const hadAudio = playingSources.size > 0 || audioFormat !== null;
+  for (const source of playingSources) {
+    source.onended = null;
+    try { source.stop(); } catch (e) { /* already stopped */ }
+  }
+  playingSources.clear();
+  nextPlayTime = 0;
+  streamDone = false;
+  audioFormat = null; // ignore frames still in flight from the cancelled answer
+  return hadAudio;
 }
 
 // Decodes a persona's avatar (data: URI from OWUI, any format the browser
