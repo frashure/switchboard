@@ -1,16 +1,54 @@
-# Assumes whisper/piper/open-webui already run elsewhere on the same host
-# or LAN (docs/design.md: Gateway is Docker, ESP32 + services on the same
-# LAN) -- this only defines the Gateway container itself.
+# Run on the host that already runs Whisper, Piper and Open WebUI.
+#
+# One-time setup:
+#   1. git submodule update --init            (LVGL sources for the web UI build)
+#   2. cp .env.example .env  and fill it in   (see that file)
+#   3. Tailscale admin console: enable MagicDNS + HTTPS certificates, and
+#      create a reusable auth key for TS_AUTHKEY
+#   4. docker compose up -d --build
+# Then open https://switchboard.<your-tailnet>.ts.net on the tablet.
+#
+# The Gateway shares the Tailscale sidecar's network namespace, so the
+# tailnet HTTPS endpoint proxies straight to it on 127.0.0.1:8090, while
+# the sidecar's attachment to the shared Docker network is what lets the
+# Gateway reach OWUI / Whisper / Piper by container name.
 services:
-  gateway:
-    build: .
-    ports:
-      - "8000:8000"
+  switchboard-ts:
+    image: tailscale/tailscale:latest
+    hostname: switchboard
     environment:
-      SWITCHBOARD_OWUI_BASE_URL: "http://host.docker.internal:3000"
-      SWITCHBOARD_OWUI_EMAIL: ""
-      SWITCHBOARD_OWUI_PASSWORD: ""
-      SWITCHBOARD_WHISPER_URI: "tcp://host.docker.internal:10300"
-      SWITCHBOARD_PIPER_URI: "tcp://host.docker.internal:10200"
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      TS_HOSTNAME: switchboard
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_USERSPACE: "true"
     volumes:
-      - ./config:/app/config
+      - ts-state:/var/lib/tailscale
+      - ./tailscale-serve.json:/config/serve.json:ro
+    networks: [shared]
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    network_mode: service:switchboard-ts
+    depends_on: [switchboard-ts]
+    env_file: .env
+    environment:
+      # Docker-network addresses override whatever dev values .env carries.
+      SWITCHBOARD_OWUI_BASE_URL: ${OWUI_URL:?set OWUI_URL in .env (e.g. http://open-webui:8080)}
+      # Wyoming is a raw TCP protocol, not HTTP.
+      SWITCHBOARD_WHISPER_URI: ${WHISPER_URI:?set WHISPER_URI in .env (e.g. tcp://wyoming-whisper:10300)}
+      SWITCHBOARD_PIPER_URI: ${PIPER_URI:?set PIPER_URI in .env (e.g. tcp://wyoming-piper:10200)}
+    volumes:
+      - ./config:/app/config:ro
+    restart: unless-stopped
+
+networks:
+  shared:
+    external: true
+    name: ${DOCKER_NETWORK:?set DOCKER_NETWORK in .env to the network OWUI/Whisper/Piper are on}
+
+volumes:
+  ts-state:

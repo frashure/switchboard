@@ -1,0 +1,15 @@
+.git
+.venv
+.venv.old
+**/__pycache__
+**/*.pyc
+**/.env
+*.wav
+*.jsonl
+*.log
+docs
+scripts
+firmware/lvgl_sim/build
+firmware/lvgl_sim/lvgl/tests
+firmware/lvgl_sim/lvgl/docs
+gateway/tests
