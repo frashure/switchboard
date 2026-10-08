@@ -19,3 +19,9 @@ venv/
 .DS_Store
 .vscode/
 .idea/
+
+# LVGL simulator build output (firmware/lvgl_sim/build.sh)
+firmware/lvgl_sim/build/
+
+# Old/rebuilt virtual environments
+.venv*/

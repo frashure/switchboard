@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Switchboard</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14141a; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  /* Scaled to fit the viewport at the canvas's 3:2 aspect ratio. Emscripten's
+     SDL mouse/touch handling corrects for CSS scaling, so taps still land
+     on the right widget. */
+  canvas.emscripten {
+    width: min(100vw, 150vh);
+    height: auto;
+    aspect-ratio: 3 / 2;
+    touch-action: none;
+    outline: none;
+  }
+</style>
+</head>
+<body>
+<canvas class="emscripten" id="canvas" width="480" height="320" oncontextmenu="event.preventDefault()"></canvas>
+<script>
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    print: function (text) { console.log(text); },
+    printErr: function (text) { console.error(text); },
+  };
+</script>
+<script src="bridge.js"></script>
+{{{ SCRIPT }}}
+</body>
+</html>
