@@ -1,0 +1,158 @@
+# Switchboard
+
+A voice assistant for the desk: pick a persona on a touchscreen, tap to talk, and
+hear the answer. Each persona is a model configured in [Open WebUI](https://github.com/open-webui/open-webui)
+(system prompt, tools, knowledge, avatar), so everything you set up there works
+by voice.
+
+A thin client (a browser on a tablet today, an ESP32 touchscreen later) captures
+audio and renders the UI. A Python **Gateway** does the rest: detects the end of
+speech, transcribes it, runs the turn through Open WebUI, and speaks the answer.
+
+```
+ Client (tablet browser / ESP32)          Gateway (FastAPI)                 Services
+┌────────────────────────────┐   WS    ┌──────────────────────┐   ┌──────────────────────────┐
+│ persona cards, tap-to-talk │◄───────►│ VAD (Silero)         │──►│ Whisper  (Wyoming STT)   │
+│ mic capture, TTS playback  │  audio  │ session state machine│──►│ Piper    (Wyoming TTS)   │
+│ transcript / response text │  + JSON │ persona discovery    │──►│ Open WebUI (LLM + tools) │
+└────────────────────────────┘         └──────────────────────┘   └──────────────────────────┘
+```
+
+**Status:** the Gateway and two browser clients work end to end against live
+services. ESP32 firmware has not been started (no hardware yet); an old tablet
+running the web client is the current path to a real device. See
+[`docs/design.md`](docs/design.md) for decisions, milestones and open items.
+
+## Features
+
+- **Personas come from Open WebUI.** Models marked as presets are discovered at
+  runtime (refreshed every 5 minutes), including their avatars. Only the Piper
+  voice per persona lives here, in `gateway/config/voices.yaml`.
+- **Tap to talk, Cancel anywhere.** One tap starts listening; the Gateway's VAD
+  decides when you stopped. Cancel interrupts speech capture, STT, a slow LLM/tool
+  turn, or audio already playing.
+- **Full Open WebUI tool use.** Turns run through Open WebUI's own chat pipeline,
+  so tools, knowledge bases and memory behave as in its web UI. Multi-turn
+  conversations continue in the same chat thread and show up in Open WebUI.
+- **Speech-friendly output.** Markdown is stripped before text-to-speech; the raw
+  text is still sent to the screen.
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| `gateway/` | The Python service (`switchboard/`), config, Dockerfile and compose stack |
+| `gateway/client/cli_client.py` | Feed WAV files through the real `/ws` endpoint, no hardware or browser |
+| `gateway/client/virtual_device/` | Plain-HTML browser client (persona buttons, tap-to-talk) |
+| `firmware/lvgl_sim/` | The touchscreen UI as LVGL widgets compiled to WebAssembly; also the planned tablet client |
+| `docs/design.md` | Architecture, locked decisions, milestones, open items |
+| `docs/protocol.md` | WebSocket protocol and the Open WebUI protocol findings |
+| `scripts/` | Early protocol spikes (Open WebUI chat protocol, Wyoming) |
+
+## Requirements
+
+- Open WebUI (developed against v0.11.3) with at least one preset model
+- A Wyoming **Whisper** (STT) and **Piper** (TTS) service, reachable over TCP
+  (ports 10300 and 10200 by default)
+- Python 3.12 or newer, or just Docker
+- A browser with microphone access for the clients. Browsers only allow the mic
+  on HTTPS or `localhost`, which is why the deployment below fronts the Gateway
+  with HTTPS.
+
+## Quick start (development)
+
+```bash
+git clone --recurse-submodules <repo-url> && cd switchboard
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e gateway
+```
+
+Create `gateway/.env`:
+
+```bash
+SWITCHBOARD_OWUI_BASE_URL=https://your-open-webui
+SWITCHBOARD_OWUI_EMAIL=you@example.com
+SWITCHBOARD_OWUI_PASSWORD='your password'
+SWITCHBOARD_WHISPER_URI=tcp://localhost:10300
+SWITCHBOARD_PIPER_URI=tcp://localhost:10200
+```
+
+If Whisper and Piper run on another machine, forward their ports first, e.g.
+`ssh -N -L 10300:localhost:10300 -L 10200:localhost:10200 user@server`.
+
+Start the Gateway. Keep the `--ws-ping-*` flags: uvicorn's 40s default closes the
+WebSocket during long tool-heavy turns.
+
+```bash
+cd gateway
+python -m uvicorn switchboard.main:app --host 0.0.0.0 --port 8090 \
+  --ws-ping-interval 120 --ws-ping-timeout 120
+curl localhost:8090/profiles      # should list your personas
+```
+
+Then try a client:
+
+```bash
+# Plain-HTML client
+python -m http.server 8001 --directory gateway/client/virtual_device
+#   -> http://localhost:8001/?gateway=localhost:8090
+
+# LVGL client (builds in a container; nothing to install on the host)
+firmware/lvgl_sim/build.sh
+python -m http.server 8002 --directory firmware/lvgl_sim/build
+#   -> http://localhost:8002/?gateway=localhost:8090
+
+# No browser: push WAV files through the pipeline
+GATEWAY_WS=ws://localhost:8090/ws python gateway/client/cli_client.py <persona_id> question.wav
+```
+
+## Deployment (Docker + Tailscale)
+
+`gateway/docker-compose.yaml` runs the Gateway on the same Docker network as Open
+WebUI, Whisper and Piper (reached by container name) behind a Tailscale sidecar
+that provides HTTPS. The image also builds the LVGL web UI and serves it from the
+Gateway, so the whole client is a single `https://switchboard.<tailnet>.ts.net` URL.
+
+1. `git submodule update --init`
+2. `cp gateway/.env.example gateway/.env` and fill it in (Docker network name,
+   container names, Open WebUI login, Tailscale auth key)
+3. In the Tailscale admin console, enable MagicDNS and HTTPS certificates
+4. `cd gateway && docker compose up -d --build`
+
+Wyoming services are plain TCP (`tcp://wyoming-whisper:10300`), not HTTP.
+
+### Using a tablet as the device
+
+Any tablet with a modern browser works, including an old Fire HD 8 without
+replacing its OS: sideload Fully Kiosk Browser and the Tailscale app, point the
+kiosk at the URL above and allow microphone access. The page is fullscreen,
+reconnects on its own after network drops and restores the selected persona.
+
+## Configuration
+
+Settings are `SWITCHBOARD_*` environment variables or entries in `gateway/.env`
+(see `gateway/switchboard/config.py` for the full list and defaults):
+
+| Variable | Purpose |
+|---|---|
+| `OWUI_BASE_URL`, `OWUI_EMAIL`, `OWUI_PASSWORD` | Open WebUI address and login |
+| `WHISPER_URI`, `PIPER_URI` | Wyoming endpoints |
+| `STATIC_DIR` | Directory of web client files to serve at `/` (set in the Docker image) |
+| `LLM_REST_POLL_TIMEOUT` | How long to wait for a finished answer, default 480s |
+| `VAD_PAUSE_THRESHOLD_MS` | Silence that ends an utterance, default 1200 |
+
+## Documentation
+
+- [`docs/design.md`](docs/design.md): architecture, decisions, milestones, open items
+- [`docs/protocol.md`](docs/protocol.md): client WebSocket protocol and Open WebUI behaviour
+  that is not obvious from its docs
+
+## Known limitations
+
+- Single device, one conversation at a time, trusted network, no authentication.
+- Long answers are synthesized in full before playback starts (sentence-level
+  streaming is a planned improvement).
+- Cancelling stops the Gateway from waiting on Open WebUI, but Open WebUI may
+  keep generating in the background.
+- The compose stack and the on-tablet experience (touch input, speaker-to-mic
+  echo) have not been exercised on real hardware yet.
