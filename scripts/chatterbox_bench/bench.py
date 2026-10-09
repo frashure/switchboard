@@ -15,7 +15,9 @@ and <out>/results.json. Run via run.sh.
 """
 
 import argparse
+import gc
 import json
+import multiprocessing as mp
 import os
 import re
 import sys
@@ -137,12 +139,90 @@ def suspicious(text, audio_s):
     return ""
 
 
+def _worker(model_name, device, jobs, results):
+    """One independent model instance (its own process, so its own Python
+    interpreter and GPU stream) pulling chunks off a shared queue."""
+    from chatterbox.tts_turbo import ChatterboxTurboTTS
+
+    model = ChatterboxTurboTTS.from_pretrained(device=device, nano=(model_name == "nano"))
+    torch.manual_seed(0)
+    model.generate("This is a short warm up sentence.")
+    results.put(("ready", os.getpid(), 0.0, 0.0))
+    while True:
+        job = jobs.get()
+        if job is None:
+            return
+        index, text = job
+        torch.manual_seed(0)
+        wav = model.generate(text)
+        results.put(("done", index, wav.numel() / model.sr, time.time()))
+
+
+def parallel_simulation(model_name, device, chunks, workers, use_cuda):
+    """Same streaming check as the single-model simulation, but with N model
+    instances synthesizing consecutive chunks concurrently. If the GPU isn't
+    saturated by one instance (small autoregressive model, many tiny kernels),
+    throughput should scale with workers until it is."""
+    ctx = mp.get_context("spawn")
+    free_before = torch.cuda.mem_get_info()[0] if use_cuda else 0
+    result = {}
+    for label in ("cold", "warm"):
+        jobs, done = ctx.Queue(), ctx.Queue()
+        procs = [ctx.Process(target=_worker, args=(model_name, device, jobs, done), daemon=True)
+                 for _ in range(workers)]
+        for proc in procs:
+            proc.start()
+        for _ in procs:
+            kind, *_ = done.get(timeout=1800)
+            assert kind == "ready"
+        vram_gb = (free_before - torch.cuda.mem_get_info()[0]) / 2**30 if use_cuda else None
+
+        start = time.time()
+        for index, chunk in enumerate(chunks):
+            jobs.put((index, chunk))
+        done_at, durs = {}, {}
+        for _ in chunks:
+            _, index, dur, finished = done.get(timeout=1800)
+            done_at[index], durs[index] = finished - start, dur
+        for _ in procs:
+            jobs.put(None)
+        for proc in procs:
+            proc.join(timeout=60)
+
+        order = range(len(chunks))
+        ttfa = done_at[0]
+        played, slack = 0.0, []
+        for k in list(order)[1:]:
+            played += durs[k - 1]
+            slack.append(ttfa + played - done_at[k])
+        total_audio = sum(durs.values())
+        # A chunk is only playable once everything before it is also ready.
+        all_done = max(done_at.values())
+        result[label] = {
+            "workers": workers,
+            "time_to_first_audio_s": round(ttfa, 2),
+            "all_synthesized_s": round(all_done, 1),
+            "audio_total_s": round(total_audio, 1),
+            "throughput_x_realtime": round(total_audio / all_done, 2),
+            "min_slack_s": round(min(slack), 1) if slack else None,
+            "extra_vram_gb_all_workers": round(vram_gb, 2) if vram_gb is not None else None,
+        }
+        log(f"-- {workers} workers, {label} --")
+        log(json.dumps(result[label], indent=2))
+        if slack:
+            log(f"VERDICT ({workers} workers, {label}): " + (
+                "keeps ahead of playback" if min(slack) > 0 else f"WOULD STALL (min slack {min(slack):.1f}s)"))
+    return result
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=["turbo", "nano"], default="turbo")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--ref", help="reference voice clip (~10s wav) to clone; default voice if omitted")
     ap.add_argument("--reps", type=int, default=2, help="timed repetitions per sample")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="also test N parallel model instances on the streaming simulation (e.g. 2 or 3)")
     ap.add_argument("--out", default="/out")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -250,6 +330,15 @@ def main():
         results["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
         log(f"\npeak VRAM allocated by this process: {results['peak_vram_gb']} GB "
             f"(of {results['vram_total_gb']} GB)")
+
+    if args.workers > 0:
+        log(f"\n== parallel streaming simulation: {args.workers} model instances ==")
+        del model
+        gc.collect()
+        if use_cuda:
+            torch.cuda.empty_cache()
+        results["streaming_sim_parallel"] = parallel_simulation(
+            args.model, args.device, chunks, args.workers, use_cuda)
 
     with open(os.path.join(args.out, "results.json"), "w") as f:
         json.dump(results, f, indent=2)

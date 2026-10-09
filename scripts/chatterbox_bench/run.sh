@@ -5,6 +5,7 @@
 #   run.sh cuda  turbo            # NVIDIA GPU (needs nvidia-container-toolkit)
 #   run.sh cpu   nano             # no GPU (slow; mostly to check the setup)
 #   run.sh rocm  turbo --ref /refs/my_voice.wav --reps 3   (put my_voice.wav next to this script)
+#   run.sh rocm  turbo --workers 2     # also test 2 parallel model instances
 #
 # Output WAVs and results.json land in ./out; model weights are cached in
 # ~/.cache/huggingface. Set HF_TOKEN if Hugging Face asks for one.
