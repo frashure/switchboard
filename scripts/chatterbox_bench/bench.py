@@ -115,6 +115,48 @@ def instrument(model):
     wrap(model.s3gen, "inference", "s3gen")
     wrap(model.watermarker, "apply_watermark", "watermark")
 
+S3GEN_SIL = 4299  # Chatterbox's "silence" speech token (models/s3gen/const.py)
+
+
+def install_bucketing(model, bucket):
+    """Bound the number of distinct tensor shapes S3Gen ever sees.
+
+    S3Gen's convolutions are tuned per input shape (on ROCm, MIOpen pays
+    ~4s the first time it meets a new one), and the shape is set by the
+    chunk's speech-token count, which varies continuously with the text. So:
+    pad the tokens with the silence token up to the next multiple of `bucket`,
+    run S3Gen, then cut the padding's worth of samples back off the end.
+    """
+    original = model.s3gen.inference
+
+    def bucketed(speech_tokens, *args, **kwargs):
+        n = speech_tokens.shape[-1]
+        pad = (-n) % bucket
+        if pad:
+            filler = torch.full((pad,), S3GEN_SIL, dtype=speech_tokens.dtype, device=speech_tokens.device)
+            speech_tokens = torch.cat([speech_tokens.reshape(-1), filler])
+        wav, source = original(speech_tokens, *args, **kwargs)
+        if pad:
+            per_token = wav.shape[-1] / (n + pad)
+            wav = wav[..., : wav.shape[-1] - int(round(pad * per_token))]
+        return wav, source
+
+    model.s3gen.inference = bucketed
+    return original
+
+
+def warm_buckets(model, bucket, max_tokens):
+    """Pre-tune every bucket shape once (what a service would do at startup)."""
+    start = time.perf_counter()
+    sizes = list(range(bucket, max_tokens + 1, bucket))
+    for size in sizes:
+        tokens = torch.full((size,), S3GEN_SIL, dtype=torch.long, device=model.device)
+        model.s3gen.inference(speech_tokens=tokens, ref_dict=model.conds.gen, n_cfm_timesteps=2)
+    sync()
+    return len(sizes), time.perf_counter() - start
+
+
+
 
 def generate(model, text):
     """Returns (audio, wall_seconds, per-stage seconds)."""
@@ -221,6 +263,11 @@ def main():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--ref", help="reference voice clip (~10s wav) to clone; default voice if omitted")
     ap.add_argument("--reps", type=int, default=2, help="timed repetitions per sample")
+    ap.add_argument("--bucket", type=int, default=0,
+                    help="pad S3Gen's speech tokens to multiples of N (e.g. 32) to bound the set of shapes, "
+                         "and pre-tune every bucket up to --max-tokens before measuring")
+    ap.add_argument("--max-tokens", type=int, default=640,
+                    help="largest speech-token count to pre-tune with --bucket (25 tokens = 1s of speech)")
     ap.add_argument("--workers", type=int, default=0,
                     help="also test N parallel model instances on the streaming simulation (e.g. 2 or 3)")
     ap.add_argument("--out", default="/out")
@@ -260,6 +307,12 @@ def main():
         log(f"prepared reference voice {args.ref} in {results['prepare_voice_s']}s "
             f"(this is paid once per persona if cached, per request if not)")
 
+    if args.bucket:
+        install_bucketing(model, args.bucket)
+        log(f"\n== bucketing S3Gen to multiples of {args.bucket} tokens; pre-tuning buckets up to {args.max_tokens} ==")
+        count, took = warm_buckets(model, args.bucket, args.max_tokens)
+        results["bucket"] = {"size": args.bucket, "buckets_warmed": count, "warmup_s": round(took, 1)}
+        log(f"warmed {count} buckets in {took:.1f}s (one-time; MIOpen's cache persists it between runs)")
     instrument(model)
     log("\n== warm-up ==")
     generate(model, "This is a short warm up sentence.")

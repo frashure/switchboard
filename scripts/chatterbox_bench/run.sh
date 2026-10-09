@@ -6,6 +6,7 @@
 #   run.sh cpu   nano             # no GPU (slow; mostly to check the setup)
 #   run.sh rocm  turbo --ref /refs/my_voice.wav --reps 3   (put my_voice.wav next to this script)
 #   run.sh rocm  turbo --workers 2     # also test 2 parallel model instances
+#   run.sh rocm  turbo --bucket 32     # bound S3Gen shapes + pre-tune them (fixes the cold-shape cost)
 #
 # Output WAVs and results.json land in ./out; model weights are cached in
 # ~/.cache/huggingface. Set HF_TOKEN if Hugging Face asks for one.
