@@ -34,10 +34,13 @@ class Profile(BaseModel):
 
 class ProfileRegistry:
     def __init__(self, voice_config: dict):
+        # A YAML key with nothing under it (e.g. `overrides:` with every entry
+        # commented out) loads as None, not {} -- so every optional section
+        # is normalised with `or`, never `.get(key, {})`.
         self._default_voice: str = voice_config["default_voice"]
-        self._voice_overrides: dict[str, str] = voice_config.get("overrides", {})
+        self._voice_overrides: dict[str, str] = voice_config.get("overrides") or {}
         chatterbox = voice_config.get("chatterbox") or {}
-        self._chatterbox_default: str = chatterbox.get("default_voice", "default")
+        self._chatterbox_default: str = chatterbox.get("default_voice") or "default"
         self._chatterbox_overrides: dict[str, str] = chatterbox.get("overrides") or {}
         self._profiles: dict[str, Profile] = {}
         self._last_refreshed: float = 0.0

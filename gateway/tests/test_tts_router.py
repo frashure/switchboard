@@ -190,3 +190,38 @@ def test_voice_mapping_for_both_backends():
 def test_voices_yaml_without_a_chatterbox_section_still_loads():
     registry = ProfileRegistry({"default_voice": "x"})
     assert registry._chatterbox_default == "default"
+
+
+@pytest.mark.parametrize("config", [
+    {"default_voice": "x", "overrides": None},
+    {"default_voice": "x", "overrides": None, "chatterbox": None},
+    {"default_voice": "x", "chatterbox": {"default_voice": None, "overrides": None}},
+])
+def test_empty_yaml_sections_load_as_none_and_must_not_crash(config):
+    class FakeOwui:
+        async def list_models(self):
+            return [{"id": "phil", "name": "Phil", "preset": True}]
+
+        async def get_model_avatar(self, model_id):
+            return None
+
+    registry = ProfileRegistry(config)
+    run(registry.refresh(FakeOwui()))
+    assert registry.get("phil").voice == "x"
+    assert registry.get("phil").chatterbox_voice == "default"
+
+
+def test_selecting_an_unknown_persona_reports_an_error_instead_of_crashing():
+    from switchboard.server.session import Emitter, Session
+
+    class Recorder(Emitter):
+        def __init__(self):
+            self.statuses = []
+
+        async def status(self, state, detail=None):
+            self.statuses.append((state, detail))
+
+    emitter = Recorder()
+    session = Session(ProfileRegistry({"default_voice": "x"}), owui=None, emitter=emitter)
+    run(session.select_persona("ghost"))
+    assert emitter.statuses == [("error", "unknown_persona")]

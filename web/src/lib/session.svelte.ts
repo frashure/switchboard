@@ -15,7 +15,13 @@ export interface Turn {
   reply: string | null;
 }
 
-export type ErrorCode = 'stt_failed' | 'llm_failed' | 'tts_failed' | 'mic_unavailable' | 'connection_lost';
+export type ErrorCode =
+  | 'stt_failed'
+  | 'llm_failed'
+  | 'tts_failed'
+  | 'mic_unavailable'
+  | 'connection_lost'
+  | 'unknown_persona';
 
 export interface AppError {
   id: number;
@@ -29,6 +35,7 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
   tts_failed: "I couldn't speak that reply, but the text is on screen.",
   mic_unavailable: 'Microphone unavailable. Check the browser permission.',
   connection_lost: 'Connection lost. Reconnecting…',
+  unknown_persona: "That persona isn't available right now.",
 };
 
 /** The slice of GatewayClient the store uses (the seam for tests). */
@@ -240,7 +247,16 @@ export class SessionStore {
         if (this.phase !== 'ready') this.phase = 'speaking';
         break;
       case 'error':
-        if (detail === 'tts_failed') {
+        if (detail === 'unknown_persona') {
+          // The Gateway doesn't know the selected persona (removed in Open
+          // WebUI, or its list was stale): back to a refreshed picker.
+          this.capture.stop();
+          this.phase = 'ready';
+          this.view = 'picker';
+          this.selectedId = null;
+          this.fail('unknown_persona');
+          void this.loadPersonas();
+        } else if (detail === 'tts_failed') {
           // Audio already sent still plays; `done` follows.
           this.fail('tts_failed');
         } else {

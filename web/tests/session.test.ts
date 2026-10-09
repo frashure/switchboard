@@ -235,6 +235,17 @@ describe('SessionStore', () => {
     expect(store.error?.code).toBe('tts_failed');
   });
 
+  it('returns to a refreshed picker when the Gateway does not know the persona', async () => {
+    const { store, gateway } = await inSession();
+    const fetchesBefore = gateway.personaFetches;
+    gateway.server({ type: 'status', state: 'error', detail: 'unknown_persona' });
+    await Promise.resolve();
+    expect(store.view).toBe('picker');
+    expect(store.selectedId).toBeNull();
+    expect(store.error?.code).toBe('unknown_persona');
+    expect(gateway.personaFetches).toBe(fetchesBefore + 1);
+  });
+
   it('abandons the turn if the microphone is unavailable', async () => {
     const { store, gateway, capture } = await inSession();
     capture.failWith = new Error('NotAllowedError');

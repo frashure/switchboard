@@ -81,7 +81,15 @@ class Session:
         self._turn_task: Optional[asyncio.Task] = None
 
     async def select_persona(self, persona_id: str) -> None:
-        self._profile = self._profiles.get(persona_id)
+        try:
+            profile = self._profiles.get(persona_id)
+        except ValueError:
+            # Not in the current persona list (e.g. removed from Open WebUI, or
+            # discovery failed): tell the client instead of killing the socket.
+            logger.warning("select_persona for unknown persona %r", persona_id)
+            await self._emit.status("error", detail="unknown_persona")
+            return
+        self._profile = profile
         self._chat_id = None  # fresh conversation on persona switch
         self._parent_id = None
         self.state = SessionState.READY
