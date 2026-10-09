@@ -25,3 +25,6 @@ firmware/lvgl_sim/build/
 
 # Old/rebuilt virtual environments
 .venv*/
+
+# Chatterbox benchmark output
+scripts/chatterbox_bench/out/
