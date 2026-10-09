@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Capture, CaptureEvents } from '../src/lib/audio/capture';
+import { LoginError, type AuthPort, type AuthStatus, type AuthUser } from '../src/lib/auth';
 import type { Player, PlayerEvents } from '../src/lib/audio/player';
 import { Emitter } from '../src/lib/emitter';
-import type { GatewayEvents } from '../src/lib/gateway';
+import { UnauthorizedError, type GatewayEvents } from '../src/lib/gateway';
 import type { AudioFormat, ClientMessage, Persona, ServerMessage } from '../src/lib/protocol';
 import { SessionStore, type GatewayPort } from '../src/lib/session.svelte';
 
@@ -17,8 +18,15 @@ class FakeGateway extends Emitter<GatewayEvents> implements GatewayPort {
   audio: ArrayBuffer[] = [];
   online = true;
   personaFetches = 0;
-  connect() {}
-  close() {}
+  connects = 0;
+  closes = 0;
+  personaError: Error | null = null;
+  connect() {
+    this.connects++;
+  }
+  close() {
+    this.closes++;
+  }
   send(message: ClientMessage) {
     if (!this.online) return false;
     this.sent.push(message);
@@ -31,6 +39,7 @@ class FakeGateway extends Emitter<GatewayEvents> implements GatewayPort {
   }
   async fetchPersonas() {
     this.personaFetches++;
+    if (this.personaError) throw this.personaError;
     return PERSONAS;
   }
   // test helpers
@@ -47,6 +56,30 @@ class FakeGateway extends Emitter<GatewayEvents> implements GatewayPort {
     return this.sent.map((m) => m.type);
   }
 }
+
+const USER: AuthUser = { id: 'u1', name: 'Alice', email: 'alice@example.com', role: 'user' };
+
+class FakeAuth implements AuthPort {
+  status: AuthStatus = { auth_mode: 'none', authenticated: true, user: null };
+  loginResult: AuthUser | Error = USER;
+  calls: string[] = [];
+  async me() {
+    this.calls.push('me');
+    return this.status;
+  }
+  async login(email: string, _password: string) {
+    this.calls.push(`login:${email}`);
+    if (this.loginResult instanceof Error) throw this.loginResult;
+    return this.loginResult;
+  }
+  async logout() {
+    this.calls.push('logout');
+  }
+}
+
+const flush = async () => {
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+};
 
 class FakeCapture extends Emitter<CaptureEvents> implements Capture {
   running = false;
@@ -87,16 +120,18 @@ class FakePlayer extends Emitter<PlayerEvents> implements Player {
   }
 }
 
-async function setup() {
+async function setup(configure?: (auth: FakeAuth) => void) {
   const gateway = new FakeGateway();
   const capture = new FakeCapture();
   const player = new FakePlayer();
-  const store = new SessionStore({ gateway, capture, player, retryPersonasMs: 1 });
+  const auth = new FakeAuth();
+  configure?.(auth);
+  const store = new SessionStore({ gateway, auth, capture, player, retryPersonasMs: 1 });
   store.start();
+  await flush();
   gateway.fire('open', { reconnect: false });
-  await Promise.resolve();
-  await Promise.resolve();
-  return { gateway, capture, player, store };
+  await flush();
+  return { gateway, capture, player, auth, store };
 }
 
 async function inSession() {
@@ -294,5 +329,140 @@ describe('SessionStore', () => {
     store.cancel();
     store.select('ophelia');
     expect(store.turns).toHaveLength(0);
+  });
+});
+
+describe('SessionStore sign-in', () => {
+  const signedOut = (auth: FakeAuth) => {
+    auth.status = { auth_mode: 'owui', authenticated: false, user: null };
+  };
+  const signedIn = (auth: FakeAuth) => {
+    auth.status = { auth_mode: 'owui', authenticated: true, user: USER };
+  };
+
+  it('with login off (AUTH_MODE=none) goes straight in', async () => {
+    const { store, gateway } = await setup();
+    expect(store.auth).toBe('signed_in');
+    expect(store.authMode).toBe('none');
+    expect(gateway.connects).toBe(1);
+  });
+
+  it('shows the login screen, without connecting or loading anything, when signed out', async () => {
+    const { store, gateway } = await setup(signedOut);
+    expect(store.auth).toBe('signed_out');
+    expect(gateway.connects).toBe(0);
+    expect(gateway.personaFetches).toBe(0);
+  });
+
+  it('resumes silently when the browser already has a valid session', async () => {
+    const { store, gateway } = await setup(signedIn);
+    expect(store.auth).toBe('signed_in');
+    expect(store.user?.name).toBe('Alice');
+    expect(gateway.connects).toBe(1);
+    expect(store.personas).toHaveLength(2);
+  });
+
+  it('logs in, then connects and loads that user\'s personas', async () => {
+    const { store, gateway, auth } = await setup(signedOut);
+    await store.login('  alice@example.com ', 'pw');
+    await flush();
+    expect(auth.calls).toContain('login:alice@example.com'); // email trimmed, password untouched
+    expect(store.auth).toBe('signed_in');
+    expect(store.user?.email).toBe('alice@example.com');
+    expect(gateway.connects).toBe(1);
+    expect(store.personas.map((p) => p.id)).toEqual(['phil', 'ophelia']);
+    expect(store.loginBusy).toBe(false);
+  });
+
+  it.each([
+    [new LoginError('invalid'), 'Incorrect email or password.'],
+    [new LoginError('rate_limited', 42), 'Too many attempts. Try again in 42s.'],
+    [new LoginError('rate_limited'), 'Too many attempts. Try again shortly.'],
+    [new LoginError('unreachable'), "Can't reach the Gateway. Check your connection."],
+  ])('reports a failed login: %s', async (error, message) => {
+    const { store, gateway } = await setup((a) => {
+      signedOut(a);
+      a.loginResult = error;
+    });
+    await store.login('a@x', 'bad');
+    expect(store.loginError).toBe(message);
+    expect(store.auth).toBe('signed_out');
+    expect(store.loginBusy).toBe(false);
+    expect(gateway.connects).toBe(0);
+  });
+
+  it('a second submit while one is in flight is ignored', async () => {
+    const { store, auth } = await setup(signedOut);
+    const first = store.login('a@x', 'pw');
+    await store.login('a@x', 'pw');
+    await first;
+    expect(auth.calls.filter((c) => c.startsWith('login')).length).toBe(1);
+  });
+
+  it('logging out wipes the previous user\'s state completely', async () => {
+    const { store, gateway, capture, player, auth } = await setup(signedIn);
+    store.select('phil');
+    await store.startTalking();
+    gateway.server({ type: 'transcript', text: 'private question' });
+    await store.logout();
+
+    expect(auth.calls).toContain('logout');
+    expect(store.auth).toBe('signed_out');
+    expect(store.user).toBeNull();
+    expect(store.personas).toEqual([]);
+    expect(store.selectedId).toBeNull();
+    expect(store.turns).toEqual([]); // the next person must not see this conversation
+    expect(store.view).toBe('picker');
+    expect(capture.running).toBe(false);
+    expect(player.calls).toContain('stop');
+    expect(gateway.closes).toBeGreaterThan(0);
+    expect(store.loginNotice).toBeNull(); // deliberate sign-out: no "expired" message
+  });
+
+  it('signing in as someone else after logout shows that user\'s data only', async () => {
+    const { store, gateway } = await setup(signedIn);
+    store.select('phil');
+    gateway.server({ type: 'transcript', text: 'first user secret' });
+    await store.logout();
+    await store.login('bob@example.com', 'pw');
+    await flush();
+    expect(store.auth).toBe('signed_in');
+    expect(store.turns).toEqual([]);
+    expect(store.selectedId).toBeNull();
+    expect(store.view).toBe('picker');
+  });
+
+  it.each([
+    ['the socket is refused as unauthorized', (g: FakeGateway) => g.fire('unauthorized', undefined)],
+    ['the persona list returns 401', (g: FakeGateway) => (g.personaError = new UnauthorizedError())],
+    ['Open WebUI rejects the token mid-turn', (g: FakeGateway) => g.server({ type: 'status', state: 'error', detail: 'session_expired' })],
+  ])('an expired session returns to login with a notice when %s', async (_name, trigger) => {
+    const { store, gateway } = await setup(signedIn);
+    if (_name.startsWith('the persona list')) {
+      trigger(gateway);
+      gateway.fire('open', { reconnect: true }); // reconnect refetches personas
+      await flush();
+    } else {
+      trigger(gateway);
+    }
+    expect(store.auth).toBe('signed_out');
+    expect(store.loginNotice).toBe('Your session expired. Please sign in again.');
+    expect(store.personas).toEqual([]);
+  });
+
+  it('keeps trying to reach a Gateway that is not up yet instead of showing the login form', async () => {
+    const gateway = new FakeGateway();
+    const auth = new FakeAuth();
+    let attempts = 0;
+    auth.me = async () => {
+      if (++attempts < 3) throw new Error('network');
+      return { auth_mode: 'owui', authenticated: false, user: null };
+    };
+    const store = new SessionStore({ gateway, auth, capture: new FakeCapture(), player: new FakePlayer(), retryPersonasMs: 1 });
+    store.start();
+    expect(store.auth).toBe('checking');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(store.auth).toBe('signed_out');
+    expect(attempts).toBe(3);
   });
 });

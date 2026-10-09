@@ -2,10 +2,19 @@ import { Emitter } from './emitter';
 import type { GatewayEndpoints } from './config';
 import type { ClientMessage, Persona, ServerMessage } from './protocol';
 
+/** The Gateway says this browser isn't signed in (HTTP 401). */
+export class UnauthorizedError extends Error {}
+
+/** WebSocket close codes the Gateway uses to refuse a connection. */
+const WS_UNAUTHORIZED = 4401;
+const WS_FORBIDDEN = 4403;
+
 export type GatewayEvents = {
   /** Socket opened. `reconnect` is true for every open after the first. */
   open: { reconnect: boolean };
   close: void;
+  /** The Gateway refused the socket because there is no valid session. */
+  unauthorized: void;
   message: ServerMessage;
   /** One binary TTS frame (PCM, format given by the preceding audio_header). */
   audio: ArrayBuffer;
@@ -57,9 +66,15 @@ export class GatewayClient extends Emitter<GatewayEvents> {
       this.everOpened = true;
       this.emit('open', { reconnect });
     };
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
       if (this.ws === ws) this.ws = null;
       this.emit('close', undefined);
+      if (event.code === WS_UNAUTHORIZED || event.code === WS_FORBIDDEN) {
+        // Reconnecting can't fix a missing session; the user has to sign in.
+        this.closedByUser = true;
+        this.emit('unauthorized', undefined);
+        return;
+      }
       if (this.closedByUser) return;
       this.retryTimer = setTimeout(() => this.connect(), this.backoffMs);
       this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs);
@@ -91,7 +106,8 @@ export class GatewayClient extends Emitter<GatewayEvents> {
   }
 
   async fetchPersonas(): Promise<Persona[]> {
-    const res = await this.fetchImpl(`${this.endpoints.http}/profiles`);
+    const res = await this.fetchImpl(`${this.endpoints.http}/profiles`, { credentials: 'same-origin' });
+    if (res.status === 401) throw new UnauthorizedError();
     if (!res.ok) throw new Error(`GET /profiles -> ${res.status}`);
     const body = (await res.json()) as { personas: Persona[] };
     return body.personas;

@@ -1,6 +1,7 @@
 import type { Capture } from './audio/capture';
+import { LoginError, type AuthPort, type AuthUser } from './auth';
 import type { Player } from './audio/player';
-import type { GatewayClient } from './gateway';
+import { UnauthorizedError, type GatewayClient } from './gateway';
 import type { AudioFormat, Persona, ServerMessage } from './protocol';
 
 /** Where a turn is, as the UI sees it. */
@@ -38,11 +39,26 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
   unknown_persona: "That persona isn't available right now.",
 };
 
+const SESSION_EXPIRED = 'Your session expired. Please sign in again.';
+
+function loginMessage(error: unknown): string {
+  if (error instanceof LoginError) {
+    if (error.kind === 'invalid') return 'Incorrect email or password.';
+    if (error.kind === 'rate_limited') {
+      return error.retryAfterSeconds
+        ? `Too many attempts. Try again in ${error.retryAfterSeconds}s.`
+        : 'Too many attempts. Try again shortly.';
+    }
+  }
+  return "Can't reach the Gateway. Check your connection.";
+}
+
 /** The slice of GatewayClient the store uses (the seam for tests). */
 export type GatewayPort = Pick<GatewayClient, 'on' | 'connect' | 'close' | 'send' | 'sendAudio' | 'fetchPersonas'>;
 
 export interface SessionDeps {
   gateway: GatewayPort;
+  auth: AuthPort;
   capture: Capture;
   player: Player;
   /** Called from user gestures so later event-driven playback is allowed. */
@@ -57,6 +73,16 @@ export interface SessionDeps {
  *  the gateway, mic and speaker are injected, so none of it needs a
  *  browser to test. */
 export class SessionStore {
+  /** 'checking' until the Gateway says whether this browser is signed in. */
+  auth = $state<'checking' | 'signed_out' | 'signed_in'>('checking');
+  /** "none": the Gateway has login turned off (single shared account). */
+  authMode = $state<'none' | 'owui'>('owui');
+  user = $state.raw<AuthUser | null>(null);
+  loginBusy = $state(false);
+  loginError = $state<string | null>(null);
+  /** Shown on the login screen after an involuntary sign-out (e.g. expiry). */
+  loginNotice = $state<string | null>(null);
+
   connection = $state<Connection>('connecting');
   personas = $state.raw<Persona[]>([]);
   personasLoaded = $state(false);
@@ -76,7 +102,10 @@ export class SessionStore {
   /** Cancels sent but not yet acknowledged by the Gateway (see handleMessage). */
   private pendingCancelAcks = 0;
   private stopped = false;
+  /** Bumped on every sign-in/out so loops from a previous session stop. */
+  private generation = 0;
   private readonly g: GatewayPort;
+  private readonly authApi: AuthPort;
   private readonly capture: Capture;
   private readonly player: Player;
   private readonly unlock: () => Promise<void>;
@@ -85,6 +114,7 @@ export class SessionStore {
 
   constructor(deps: SessionDeps) {
     this.g = deps.gateway;
+    this.authApi = deps.auth;
     this.capture = deps.capture;
     this.player = deps.player;
     this.unlock = deps.unlockAudio ?? (async () => {});
@@ -93,6 +123,7 @@ export class SessionStore {
 
     this.g.on('open', ({ reconnect }) => this.onOpen(reconnect));
     this.g.on('close', () => this.onClose());
+    this.g.on('unauthorized', () => this.signedOut(SESSION_EXPIRED));
     this.g.on('message', (message) => this.handleMessage(message));
     this.g.on('audio', (frame) => this.player.push(frame));
     this.capture.on('frame', (pcm) => {
@@ -107,21 +138,90 @@ export class SessionStore {
     });
   }
 
-  /** Connect and load personas. Safe to call once at startup. */
+  /** Find out whether we're signed in, then connect. Call once at startup. */
   start(): void {
     this.stopped = false;
-    this.g.connect();
-    void this.loadPersonas();
+    void this.checkAuth();
   }
 
   stop(): void {
     this.stopped = true;
+    this.generation++;
     this.capture.stop();
     this.player.stop();
     this.g.close();
   }
 
+  private async checkAuth(): Promise<void> {
+    const generation = this.generation;
+    while (!this.stopped && generation === this.generation) {
+      try {
+        const status = await this.authApi.me();
+        this.authMode = status.auth_mode;
+        if (status.authenticated) {
+          this.user = status.user;
+          this.enter();
+        } else {
+          this.auth = 'signed_out';
+        }
+        return;
+      } catch {
+        // Gateway not reachable yet: keep the splash up and retry.
+        await new Promise((resolve) => setTimeout(resolve, this.retryPersonasMs));
+      }
+    }
+  }
+
+  /** Signed in (or login is off): open the socket and load this user's personas. */
+  private enter(): void {
+    this.auth = 'signed_in';
+    this.loginError = null;
+    this.loginNotice = null;
+    this.connection = 'connecting';
+    this.generation++;
+    this.g.connect();
+    void this.loadPersonas();
+  }
+
+  /** Back to the login screen, wiping everything that belonged to the old session. */
+  private signedOut(notice: string | null): void {
+    if (this.auth === 'signed_out') return;
+    this.generation++;
+    this.resetTurnState();
+    this.g.close();
+    this.auth = 'signed_out';
+    this.user = null;
+    this.personas = [];
+    this.personasLoaded = false;
+    this.accents = {};
+    this.selectedId = null;
+    this.view = 'picker';
+    this.turns = [];
+    this.error = null;
+    this.loginNotice = notice;
+  }
+
   // ---- Actions (what the UI calls) ----
+
+  async login(email: string, password: string): Promise<void> {
+    if (this.loginBusy) return;
+    this.loginBusy = true;
+    this.loginError = null;
+    this.loginNotice = null;
+    try {
+      this.user = await this.authApi.login(email.trim(), password);
+      this.enter();
+    } catch (error) {
+      this.loginError = loginMessage(error);
+    } finally {
+      this.loginBusy = false;
+    }
+  }
+
+  async logout(): Promise<void> {
+    await this.authApi.logout().catch(() => {});
+    this.signedOut(null);
+  }
 
   /** Pick a persona and enter its session. Wrap in a view transition at the call site. */
   select(id: string): void {
@@ -247,7 +347,9 @@ export class SessionStore {
         if (this.phase !== 'ready') this.phase = 'speaking';
         break;
       case 'error':
-        if (detail === 'unknown_persona') {
+        if (detail === 'session_expired') {
+          this.signedOut(SESSION_EXPIRED);
+        } else if (detail === 'unknown_persona') {
           // The Gateway doesn't know the selected persona (removed in Open
           // WebUI, or its list was stale): back to a refreshed picker.
           this.capture.stop();
@@ -289,13 +391,20 @@ export class SessionStore {
   }
 
   private async loadPersonas(): Promise<void> {
-    while (!this.stopped) {
+    const generation = this.generation;
+    while (!this.stopped && generation === this.generation) {
       try {
-        this.personas = await this.g.fetchPersonas();
+        const personas = await this.g.fetchPersonas();
+        if (generation !== this.generation) return; // signed out / in again meanwhile
+        this.personas = personas;
         this.personasLoaded = true;
         void this.loadAccents();
         return;
-      } catch {
+      } catch (error) {
+        if (error instanceof UnauthorizedError) {
+          this.signedOut(SESSION_EXPIRED);
+          return;
+        }
         await new Promise((resolve) => setTimeout(resolve, this.retryPersonasMs));
       }
     }

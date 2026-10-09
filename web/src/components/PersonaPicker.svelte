@@ -3,6 +3,7 @@
   import { useSession } from '../lib/context';
   import { withViewTransition } from '../lib/transitions';
   import PersonaCard from './PersonaCard.svelte';
+  import UserChip from './UserChip.svelte';
 
   const session = useSession();
 
@@ -20,8 +21,11 @@
 
 <section class="picker view-enter">
   <header>
-    <p class="eyebrow">Switchboard</p>
-    <h1>Who would you like to talk to?</h1>
+    <div class="titles">
+      <p class="eyebrow">Switchboard</p>
+      <h1>Who would you like to talk to?</h1>
+    </div>
+    <UserChip />
   </header>
 
   {#if !session.personasLoaded}
@@ -61,6 +65,10 @@
   }
   header {
     padding-top: clamp(4px, 3vh, 28px);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
   }
   .eyebrow {
     margin: 0 0 8px;

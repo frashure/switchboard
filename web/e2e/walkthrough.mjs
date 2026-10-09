@@ -31,6 +31,14 @@ const waitPhase = (p, timeout = 120000) => page.waitForFunction((p) => document.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 await page.goto(URL, { waitUntil: 'networkidle2' });
+// With AUTH_MODE=owui the first screen is the login form (EMAIL / PASSWORD env).
+await page.waitForSelector('.card, input[name=email]', { timeout: 30000 });
+if (await page.$('input[name=email]')) {
+  if (!process.env.EMAIL || !process.env.PASSWORD) throw new Error('login required: set EMAIL and PASSWORD');
+  await page.type('input[name=email]', process.env.EMAIL);
+  await page.type('input[name=password]', process.env.PASSWORD);
+  await page.click('button.submit');
+}
 await page.waitForSelector('.card', { timeout: 30000 });
 await sleep(1800); // entrance animations + accent extraction
 await shot('1-picker');

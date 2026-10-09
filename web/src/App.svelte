@@ -1,5 +1,6 @@
 <script lang="ts">
   import ConnectionBanner from './components/ConnectionBanner.svelte';
+  import LoginView from './components/LoginView.svelte';
   import PersonaPicker from './components/PersonaPicker.svelte';
   import SessionView from './components/SessionView.svelte';
   import Toast from './components/Toast.svelte';
@@ -17,14 +18,22 @@
 <div class="ambient tint" style:--hue={hue} data-view={session.view}></div>
 
 <main>
-  {#if session.view === 'session' && session.selected}
+  {#if session.auth === 'checking'}
+    <div class="splash" aria-busy="true" aria-label="Connecting">
+      <img src="./icon.svg" alt="" width="84" height="84" />
+    </div>
+  {:else if session.auth === 'signed_out'}
+    <LoginView />
+  {:else if session.view === 'session' && session.selected}
     <SessionView />
   {:else}
     <PersonaPicker />
   {/if}
 </main>
 
-<ConnectionBanner />
+{#if session.auth === 'signed_in'}
+  <ConnectionBanner />
+{/if}
 <Toast />
 
 <style>
@@ -46,5 +55,20 @@
   }
   main {
     height: 100%;
+  }
+  .splash {
+    height: 100%;
+    display: grid;
+    place-items: center;
+  }
+  .splash img {
+    border-radius: 22px;
+    animation: breathe 1.8s ease-in-out infinite;
+  }
+  @keyframes breathe {
+    50% {
+      transform: scale(1.07);
+      opacity: 0.8;
+    }
   }
 </style>

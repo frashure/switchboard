@@ -3,6 +3,7 @@ import { registerSW } from 'virtual:pwa-register';
 import App from './App.svelte';
 import './app.css';
 import { MicCapture } from './lib/audio/capture';
+import { AuthClient } from './lib/auth';
 import { unlockAudio } from './lib/audio/context';
 import { StreamPlayer } from './lib/audio/player';
 import { resolveEndpoints } from './lib/config';
@@ -11,8 +12,10 @@ import { SessionStore } from './lib/session.svelte';
 import { accentFromAvatar } from './lib/theme';
 import { keepScreenOn } from './lib/wakelock';
 
+const endpoints = resolveEndpoints();
 const session = new SessionStore({
-  gateway: new GatewayClient(resolveEndpoints()),
+  gateway: new GatewayClient(endpoints),
+  auth: new AuthClient(endpoints.http),
   capture: new MicCapture(),
   player: new StreamPlayer(),
   unlockAudio,
