@@ -24,7 +24,8 @@ REFRESH_INTERVAL_S = 300
 class Profile(BaseModel):
     display_name: str
     model: str
-    voice: str
+    voice: str  # Piper voice name
+    chatterbox_voice: str = "default"  # reference-clip name in services/chatterbox/voices
     # data: URI (base64), or None if OWUI has no avatar configured for this
     # persona -- fetched per-persona since /api/models (list_models) doesn't
     # include it, only the per-model /api/v1/models/model endpoint does.
@@ -35,6 +36,9 @@ class ProfileRegistry:
     def __init__(self, voice_config: dict):
         self._default_voice: str = voice_config["default_voice"]
         self._voice_overrides: dict[str, str] = voice_config.get("overrides", {})
+        chatterbox = voice_config.get("chatterbox") or {}
+        self._chatterbox_default: str = chatterbox.get("default_voice", "default")
+        self._chatterbox_overrides: dict[str, str] = chatterbox.get("overrides") or {}
         self._profiles: dict[str, Profile] = {}
         self._last_refreshed: float = 0.0
 
@@ -61,6 +65,7 @@ class ProfileRegistry:
                 display_name=m.get("name", m["id"]),
                 model=m["id"],
                 voice=self._voice_overrides.get(m["id"], self._default_voice),
+                chatterbox_voice=self._chatterbox_overrides.get(m["id"], self._chatterbox_default),
                 avatar=avatar,
             )
             for m, avatar in zip(models, avatars)

@@ -1,20 +1,12 @@
 """Wyoming v2 TTS client. Protocol confirmed working in scripts/wyoming_test.py."""
 
-from dataclasses import dataclass
-
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncTcpClient
 from wyoming.tts import Synthesize, SynthesizeVoice
 
 from switchboard.config import settings
-
-
-@dataclass
-class SynthesizedAudio:
-    audio: bytes
-    rate: int
-    width: int
-    channels: int
+from switchboard.profiles import Profile
+from switchboard.tts.base import SynthesizedAudio
 
 
 async def synthesize(text: str, voice: str) -> SynthesizedAudio:
@@ -37,3 +29,13 @@ async def synthesize(text: str, voice: str) -> SynthesizedAudio:
     if rate is None:
         raise RuntimeError(f"Piper never sent AudioStart for voice {voice!r}")
     return SynthesizedAudio(audio=bytes(audio), rate=rate, width=width, channels=channels)
+
+
+class PiperBackend:
+    name = "piper"
+
+    async def synthesize(self, text: str, profile: Profile) -> SynthesizedAudio:
+        return await synthesize(text, profile.voice)
+
+    async def is_ready(self) -> bool:
+        return True  # no health probe: failures surface (and are handled) when used

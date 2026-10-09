@@ -7,3 +7,12 @@ overrides:
   phil: "en_GB-alan-low"                 # confirmed real voice, 16000 Hz
   aida: "en_GB-alba-medium"
   libby: "en_GB-alba-medium"
+
+# Chatterbox voices (only used when SWITCHBOARD_TTS_BACKEND=chatterbox).
+# Each value is the name of a reference clip -- ~10 s of clean speech saved as
+# services/chatterbox/voices/<name>.wav -- and "default" is the model's
+# built-in voice. Only clone voices you have the right to use.
+chatterbox:
+  default_voice: default
+  overrides: {}
+  #  phil: phil_reference      # -> services/chatterbox/voices/phil_reference.wav

@@ -41,8 +41,48 @@ services:
       # Wyoming is a raw TCP protocol, not HTTP.
       SWITCHBOARD_WHISPER_URI: ${WHISPER_URI:?set WHISPER_URI in .env (e.g. tcp://wyoming-whisper:10300)}
       SWITCHBOARD_PIPER_URI: ${PIPER_URI:?set PIPER_URI in .env (e.g. tcp://wyoming-piper:10200)}
+      # "chatterbox" prefers the service below (falling back to Piper while it
+      # warms up or if it is down); needs `--profile chatterbox` to be running.
+      SWITCHBOARD_TTS_BACKEND: ${TTS_BACKEND:-piper}
+      SWITCHBOARD_CHATTERBOX_URL: http://chatterbox:8000
     volumes:
       - ./config:/app/config:ro
+    restart: unless-stopped
+
+  # Optional higher-quality TTS: `docker compose --profile chatterbox up -d --build`
+  # and set TTS_BACKEND=chatterbox in .env. First start downloads the model and
+  # pre-tunes ~20 GPU shape buckets (a few minutes; cached in the volumes
+  # below, so restarts are quick). Until it reports ready, the Gateway keeps
+  # speaking with Piper.
+  chatterbox:
+    profiles: ["chatterbox"]
+    build:
+      context: ../services/chatterbox
+      args:
+        # ROCm 7.2 wheels by default; for NVIDIA use .../whl/cu126 and swap the
+        # device/group lines below for `gpus: all`.
+        TORCH_INDEX: ${CHATTERBOX_TORCH_INDEX:-https://download.pytorch.org/whl/rocm7.2}
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    # Numeric host GIDs (names resolve inside the container, which lacks "render"):
+    #   getent group video render
+    group_add:
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-109}"
+    security_opt:
+      - seccomp=unconfined
+    ipc: host
+    environment:
+      CHATTERBOX_MODEL: turbo
+      CHATTERBOX_DEVICE: cuda # ROCm builds of torch also call it "cuda"
+    volumes:
+      - chatterbox-hf:/root/.cache/huggingface
+      - chatterbox-miopen-config:/root/.config/miopen
+      - chatterbox-miopen-cache:/root/.cache/miopen
+      # Reference clips (<name>.wav, ~10 s) referenced from config/voices.yaml
+      - ../services/chatterbox/voices:/voices:ro
+    networks: [shared]
     restart: unless-stopped
 
 networks:
@@ -52,3 +92,6 @@ networks:
 
 volumes:
   ts-state:
+  chatterbox-hf:
+  chatterbox-miopen-config:
+  chatterbox-miopen-cache:

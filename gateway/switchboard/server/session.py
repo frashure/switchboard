@@ -13,7 +13,7 @@ from switchboard.llm.owui_client import OwuiClient
 from switchboard.profiles import Profile, ProfileRegistry
 from switchboard.stt.whisper import transcribe
 from switchboard.text import split_for_speech, strip_markdown
-from switchboard.tts.piper import synthesize
+from switchboard.tts import TtsRouter, router as default_tts_router
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,10 @@ class Emitter:
 
 
 class Session:
-    def __init__(self, profiles: ProfileRegistry, owui: OwuiClient, emitter: Emitter):
+    def __init__(
+        self, profiles: ProfileRegistry, owui: OwuiClient, emitter: Emitter, tts: TtsRouter | None = None
+    ):
+        self._tts = tts or default_tts_router
         self._profiles = profiles
         self._owui = owui
         self._emit = emitter
@@ -218,11 +221,10 @@ class Session:
             # Strip markdown for speech only -- llm_text above still carries
             # the raw text in case a future display ever renders it.
             chunks = split_for_speech(strip_markdown(final_text))
+            voice = await self._tts.for_answer(self._profile)
             started = False
             for chunk in chunks:
-                synthesized = await asyncio.wait_for(
-                    synthesize(chunk, self._profile.voice), timeout=settings.tts_timeout
-                )
+                synthesized = await asyncio.wait_for(voice.synthesize(chunk), timeout=settings.tts_timeout)
                 if not started:
                     self.state = SessionState.PLAY
                     await self._emit.status("speaking")

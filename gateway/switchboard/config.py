@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -55,6 +56,15 @@ class Settings(BaseSettings):
     vad_pre_roll_ms: int = 300
     vad_pause_threshold_ms: int = 1200
     vad_max_utterance_s: float = 15.0
+
+    # Which TTS the Gateway prefers. "chatterbox" needs the services/chatterbox
+    # container; Piper is always the fallback (service warming up, down, or
+    # failing on an answer's first chunk) -- see tts/__init__.py.
+    tts_backend: Literal["piper", "chatterbox"] = "piper"
+    chatterbox_url: str = "http://localhost:8000"
+    # Per request. Kept well under tts_timeout so a hung service still leaves
+    # time to fall back to Piper within the same chunk's budget.
+    chatterbox_timeout: float = 15.0
 
     # Directory of built web client files (the LVGL simulator build plus
     # virtual_device/) to serve at "/" -- one origin for page, /profiles and
