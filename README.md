@@ -48,6 +48,8 @@ web app is the current path to a real device. See
 | `web/` | **The web app** (Svelte PWA): persona picker, animated session screen, streaming playback. See [`web/README.md`](web/README.md) |
 | `gateway/client/cli_client.py` | Feed WAV files through the real `/ws` endpoint, no hardware or browser |
 | `gateway/client/virtual_device/` | Minimal plain-HTML client, kept as a protocol reference |
+| `services/chatterbox/` | Optional higher-quality TTS service ([Chatterbox-Turbo](https://github.com/resemble-ai/chatterbox)) the Gateway can prefer over Piper |
+| `scripts/chatterbox_bench/` | Benchmark used to evaluate Chatterbox on the server's GPU (speed, VRAM, streaming stalls) |
 | `firmware/lvgl_sim/` | The UI as LVGL widgets compiled to WebAssembly: a prototype for future embedded (ESP32) devices, not the primary client |
 | `docs/design.md` | Architecture, locked decisions, milestones, open items |
 | `docs/protocol.md` | WebSocket protocol and the Open WebUI protocol findings |
@@ -142,6 +144,31 @@ Fully Kiosk Browser), open the URL above, allow microphone access, and use
 and keeps the screen awake. It reconnects on its own after network drops and
 restores the selected persona.
 
+### Optional: Chatterbox voices
+
+Chatterbox sounds considerably more natural than Piper and can give each persona
+its own cloned voice. It runs as a separate GPU container and is entirely optional:
+the Gateway prefers it when it reports ready and silently uses Piper otherwise
+(while it warms up, if it is down, or if it fails on an answer's first chunk).
+
+```bash
+# in gateway/.env:  TTS_BACKEND=chatterbox   (and VIDEO_GID / RENDER_GID for GPU access)
+docker compose --profile chatterbox up -d --build
+curl localhost:8000/health        # from the host, or check the container logs
+```
+
+- **First start** downloads the model and pre-tunes ~20 GPU shape buckets, which takes a few
+  minutes; the result is cached in volumes, so later restarts are quick. Until `/health`
+  reports `ready`, answers are spoken by Piper.
+- **Voices:** drop a ~10 s clean reference clip at `services/chatterbox/voices/<name>.wav`
+  and map a persona to it under `chatterbox:` in `gateway/config/voices.yaml`. Without one a
+  persona uses the model's built-in voice. Only clone voices you have the right to use; output
+  carries Resemble's inaudible watermark.
+- **AMD (ROCm) vs NVIDIA:** the image defaults to ROCm 7.2 PyTorch wheels (tested on a Radeon AI PRO
+  R9700); set `CHATTERBOX_TORCH_INDEX` to a `cu12x` index and use `gpus: all` for NVIDIA.
+- Measured on the R9700: ~2.7x real time with a ~2.1 s first chunk and ~3.4 GB VRAM. Why the shape
+  bucketing and warm-up exist is in `docs/design.md`.
+
 ## Configuration
 
 Settings are `SWITCHBOARD_*` environment variables or entries in `gateway/.env`
@@ -154,6 +181,8 @@ Settings are `SWITCHBOARD_*` environment variables or entries in `gateway/.env`
 | `STATIC_DIR` | Directory of web client files to serve at `/` (set in the Docker image) |
 | `LLM_REST_POLL_TIMEOUT` | How long to wait for a finished answer, default 480s |
 | `VAD_PAUSE_THRESHOLD_MS` | Silence that ends an utterance, default 1200 |
+| `TTS_BACKEND` | `piper` (default) or `chatterbox` (Piper remains the fallback) |
+| `CHATTERBOX_URL` | Chatterbox service address (`http://chatterbox:8000` in the compose stack) |
 
 ## Documentation
 
