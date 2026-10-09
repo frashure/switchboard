@@ -6,8 +6,9 @@ Answers three questions with numbers (and WAVs to listen to):
   2. How fast? Real-time factor per chunk, and time to the *first* chunk
      (what a listener waits for under sentence-level streaming).
   3. Would streaming stall? Simulates a ~1,200-char answer through the
-     Gateway's own chunker and checks each chunk is ready before the
-     previous one finishes playing.
+     Gateway's own chunker (twice: cold, then warm) and checks each chunk is
+     ready before the previous one finishes playing. Also breaks the time
+     down by stage (T3 / S3Gen / CPU watermark) to show where it goes.
 
 Outputs: <out>/*.wav (listen for hallucinated words, cut-offs, odd pauses)
 and <out>/results.json. Run via run.sh.
@@ -88,14 +89,42 @@ def save_wav(path, audio, sr):
         w.writeframes(pcm.tobytes())
 
 
+# Where the time goes: Chatterbox-Turbo is T3 (autoregressive speech-token
+# model) -> S3Gen (token-to-waveform: conv/flow decoder) -> a CPU watermark pass.
+STAGES = {"t3": 0.0, "s3gen": 0.0, "watermark": 0.0}
+
+
+def instrument(model):
+    def wrap(obj, name, key):
+        original = getattr(obj, name)
+
+        def timed(*args, **kwargs):
+            sync()
+            t = time.perf_counter()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                sync()
+                STAGES[key] += time.perf_counter() - t
+
+        setattr(obj, name, timed)
+
+    wrap(model.t3, "inference_turbo", "t3")
+    wrap(model.s3gen, "inference", "s3gen")
+    wrap(model.watermarker, "apply_watermark", "watermark")
+
+
 def generate(model, text):
+    """Returns (audio, wall_seconds, per-stage seconds)."""
     torch.manual_seed(0)
+    for key in STAGES:
+        STAGES[key] = 0.0
     sync()
     t = time.perf_counter()
     wav = model.generate(text)
     sync()
     elapsed = time.perf_counter() - t
-    return wav.detach().float().cpu().numpy().reshape(-1), elapsed
+    return wav.detach().float().cpu().numpy().reshape(-1), elapsed, dict(STAGES)
 
 
 def suspicious(text, audio_s):
@@ -151,52 +180,71 @@ def main():
         log(f"prepared reference voice {args.ref} in {results['prepare_voice_s']}s "
             f"(this is paid once per persona if cached, per request if not)")
 
+    instrument(model)
     log("\n== warm-up ==")
     generate(model, "This is a short warm up sentence.")
 
-    log("\n== per-chunk speed (sec of audio produced per sec of compute; need > 1 to keep up) ==")
-    log(f"{'sample':16s} {'chars':>5s} {'audio_s':>8s} {'wall_s':>7s} {'RTF':>6s}  note")
+    log("\n== per-chunk speed (audio seconds produced per compute second; need > 1 to keep up) ==")
+    log("cold = first time this text/shape is seen; warm = best of the repeats (shape solutions cached)")
+    log(f"{'sample':16s} {'chars':>5s} {'audio_s':>8s} {'cold_s':>7s} {'warm_s':>7s} {'RTFcold':>8s} {'RTFwarm':>8s} | "
+        f"{'t3':>5s} {'s3gen':>6s} {'wmark':>6s}  note")
     rows = []
     for name, text in SAMPLES.items():
-        walls, audio = [], None
-        for _ in range(args.reps):
-            audio, el = generate(model, text)
-            walls.append(el)
+        runs = [generate(model, text) for _ in range(max(2, args.reps))]
+        audio, cold = runs[0][0], runs[0][1]
+        warm_run = min(runs[1:], key=lambda r: r[1])
+        warm, stages = warm_run[1], warm_run[2]
         audio_s = len(audio) / model.sr
-        wall = min(walls)
         note = suspicious(text, audio_s)
         save_wav(os.path.join(args.out, f"{args.model}_{name}.wav"), audio, model.sr)
         rows.append({"sample": name, "chars": len(text), "audio_s": round(audio_s, 2),
-                     "wall_s": round(wall, 3), "rtf": round(audio_s / wall, 1), "note": note})
-        log(f"{name:16s} {len(text):5d} {audio_s:8.2f} {wall:7.3f} {audio_s / wall:6.1f}  {note}")
+                     "cold_s": round(cold, 3), "warm_s": round(warm, 3),
+                     "rtf_cold": round(audio_s / cold, 1), "rtf_warm": round(audio_s / warm, 1),
+                     "stages_warm_s": {k: round(v, 3) for k, v in stages.items()}, "note": note})
+        log(f"{name:16s} {len(text):5d} {audio_s:8.2f} {cold:7.2f} {warm:7.2f} {audio_s / cold:8.1f} {audio_s / warm:8.1f} | "
+            f"{stages['t3']:5.2f} {stages['s3gen']:6.2f} {stages['watermark']:6.2f}  {note}")
     results["samples"] = rows
 
-    log("\n== streaming simulation: ~1,200-char answer through the Gateway's chunker ==")
     chunks = split_for_speech(ANSWER)
-    start = time.perf_counter()
-    done_at, durs = [], []
-    for chunk in chunks:
-        audio, _ = generate(model, chunk)
-        done_at.append(time.perf_counter() - start)
-        durs.append(len(audio) / model.sr)
-    ttfa = done_at[0]
-    played, slack = 0.0, []
-    for k in range(1, len(chunks)):
-        played += durs[k - 1]
-        slack.append(ttfa + played - done_at[k])  # chunk k must be ready when chunk k-1 ends
-    sim = {
-        "chunks": len(chunks),
-        "answer_chars": len(ANSWER),
-        "audio_total_s": round(sum(durs), 1),
-        "time_to_first_audio_s": round(ttfa, 2),
-        "all_synthesized_s": round(done_at[-1], 1),
-        "min_slack_s": round(min(slack), 1) if slack else None,
-    }
-    results["streaming_sim"] = sim
-    log(json.dumps(sim, indent=2))
-    if slack:
-        log("VERDICT: " + ("keeps ahead of playback" if min(slack) > 0
-                           else f"WOULD STALL (min slack {min(slack):.1f}s)"))
+
+    def simulate(label):
+        start = time.perf_counter()
+        done_at, durs, totals = [], [], {k: 0.0 for k in STAGES}
+        for chunk in chunks:
+            audio, _, stages = generate(model, chunk)
+            done_at.append(time.perf_counter() - start)
+            durs.append(len(audio) / model.sr)
+            for k in totals:
+                totals[k] += stages[k]
+        ttfa = done_at[0]
+        played, slack = 0.0, []
+        for k in range(1, len(chunks)):
+            played += durs[k - 1]
+            slack.append(ttfa + played - done_at[k])  # chunk k must be ready when chunk k-1 ends
+        sim = {
+            "pass": label,
+            "chunks": len(chunks),
+            "answer_chars": len(ANSWER),
+            "audio_total_s": round(sum(durs), 1),
+            "time_to_first_audio_s": round(ttfa, 2),
+            "all_synthesized_s": round(done_at[-1], 1),
+            "throughput_x_realtime": round(sum(durs) / done_at[-1], 2),
+            "min_slack_s": round(min(slack), 1) if slack else None,
+            "stage_totals_s": {k: round(v, 1) for k, v in totals.items()},
+        }
+        log(json.dumps(sim, indent=2))
+        if slack:
+            log(f"VERDICT ({label}): " + ("keeps ahead of playback" if min(slack) > 0
+                                          else f"WOULD STALL (min slack {min(slack):.1f}s)"))
+        return sim
+
+    log("\n== streaming simulation: ~1,200-char answer through the Gateway's chunker ==")
+    log("-- pass 1 (cold: chunk lengths this process has not synthesized yet) --")
+    cold_sim = simulate("cold")
+    log("-- pass 2 (warm: identical chunks again) --")
+    warm_sim = simulate("warm")
+    results["streaming_sim_cold"] = cold_sim
+    results["streaming_sim_warm"] = warm_sim
 
     if use_cuda:
         results["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)

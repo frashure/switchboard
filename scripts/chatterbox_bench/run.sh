@@ -34,8 +34,12 @@ esac
 IMAGE="chatterbox-bench:$GPU"
 docker build -t "$IMAGE" --build-arg TORCH_INDEX="$INDEX" .
 
-mkdir -p out "$HOME/.cache/huggingface"
-EXTRA_ENV=()
+mkdir -p out "$HOME/.cache/huggingface" "$HOME/.cache/chatterbox-bench/miopen-config" "$HOME/.cache/chatterbox-bench/miopen-cache"
+# MIOpen (ROCm's conv library) compiles/tunes kernels per tensor shape; keep
+# its caches across runs, or every run pays that cost again. Its warnings are
+# also extremely chatty, so only show errors (override with MIOPEN_LOG_LEVEL).
+EXTRA_ENV=(-e "MIOPEN_LOG_LEVEL=${MIOPEN_LOG_LEVEL:-2}")
+for var in $(compgen -e | grep '^MIOPEN_' | grep -v '^MIOPEN_LOG_LEVEL$' || true); do EXTRA_ENV+=(-e "$var"); done
 [ -n "${HF_TOKEN:-}" ] && EXTRA_ENV+=(-e HF_TOKEN)
 [ -n "${HSA_OVERRIDE_GFX_VERSION:-}" ] && EXTRA_ENV+=(-e HSA_OVERRIDE_GFX_VERSION)
 
@@ -43,6 +47,8 @@ DEVICE=$([ "$GPU" = cpu ] && echo cpu || echo cuda)   # ROCm torch also calls it
 docker run --rm "${RUN_FLAGS[@]}" "${EXTRA_ENV[@]}" \
   -v "$PWD/out:/out" \
   -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  -v "$HOME/.cache/chatterbox-bench/miopen-config:/root/.config/miopen" \
+  -v "$HOME/.cache/chatterbox-bench/miopen-cache:/root/.cache/miopen" \
   -v "$PWD/../../gateway/switchboard/text.py:/bench/switchboard_text.py:ro" \
   -v "$PWD:/refs:ro" \
   "$IMAGE" --model "$MODEL" --device "$DEVICE" --out /out "$@"
