@@ -13,3 +13,6 @@ firmware/lvgl_sim/build
 firmware/lvgl_sim/lvgl/tests
 firmware/lvgl_sim/lvgl/docs
 gateway/tests
+web/node_modules
+web/dist
+web/e2e

@@ -5,12 +5,12 @@ hear the answer. Each persona is a model configured in [Open WebUI](https://gith
 (system prompt, tools, knowledge, avatar), so everything you set up there works
 by voice.
 
-A thin client (a browser on a tablet today, an ESP32 touchscreen later) captures
-audio and renders the UI. A Python **Gateway** does the rest: detects the end of
+A thin client (the web app in a browser or on a tablet today, an ESP32 touchscreen
+possibly later) captures audio and renders the UI. A Python **Gateway** does the rest: detects the end of
 speech, transcribes it, runs the turn through Open WebUI, and speaks the answer.
 
 ```
- Client (tablet browser / ESP32)          Gateway (FastAPI)                 Services
+ Client (web app / ESP32)                Gateway (FastAPI)                 Services
 ┌────────────────────────────┐   WS    ┌──────────────────────┐   ┌──────────────────────────┐
 │ persona cards, tap-to-talk │◄───────►│ VAD (Silero)         │──►│ Whisper  (Wyoming STT)   │
 │ mic capture, TTS playback  │  audio  │ session state machine│──►│ Piper    (Wyoming TTS)   │
@@ -18,9 +18,9 @@ speech, transcribes it, runs the turn through Open WebUI, and speaks the answer.
 └────────────────────────────┘         └──────────────────────┘   └──────────────────────────┘
 ```
 
-**Status:** the Gateway and two browser clients work end to end against live
-services. ESP32 firmware has not been started (no hardware yet); an old tablet
-running the web client is the current path to a real device. See
+**Status:** the Gateway and the web app work end to end against live services.
+ESP32 firmware has not been started (no hardware yet); an old tablet running the
+web app is the current path to a real device. See
 [`docs/design.md`](docs/design.md) for decisions, milestones and open items.
 
 ## Features
@@ -45,9 +45,10 @@ running the web client is the current path to a real device. See
 | Path | What it is |
 |---|---|
 | `gateway/` | The Python service (`switchboard/`), config, Dockerfile and compose stack |
+| `web/` | **The web app** (Svelte PWA): persona picker, animated session screen, streaming playback. See [`web/README.md`](web/README.md) |
 | `gateway/client/cli_client.py` | Feed WAV files through the real `/ws` endpoint, no hardware or browser |
-| `gateway/client/virtual_device/` | Plain-HTML browser client (persona buttons, tap-to-talk) |
-| `firmware/lvgl_sim/` | The touchscreen UI as LVGL widgets compiled to WebAssembly; also the planned tablet client |
+| `gateway/client/virtual_device/` | Minimal plain-HTML client, kept as a protocol reference |
+| `firmware/lvgl_sim/` | The UI as LVGL widgets compiled to WebAssembly: a prototype for future embedded (ESP32) devices, not the primary client |
 | `docs/design.md` | Architecture, locked decisions, milestones, open items |
 | `docs/protocol.md` | WebSocket protocol and the Open WebUI protocol findings |
 | `scripts/` | Early protocol spikes (Open WebUI chat protocol, Wyoming) |
@@ -93,7 +94,14 @@ python -m uvicorn switchboard.main:app --host 0.0.0.0 --port 8090 \
 curl localhost:8090/profiles      # should list your personas
 ```
 
-Then try a client:
+Then run the web app with hot reload (needs Node 22+):
+
+```bash
+cd web && npm install && npm run dev
+#   -> http://localhost:5173  (proxies /profiles and /ws to the Gateway on :8090)
+```
+
+Other clients:
 
 ```bash
 # Plain-HTML client
@@ -113,8 +121,9 @@ GATEWAY_WS=ws://localhost:8090/ws python gateway/client/cli_client.py <persona_i
 
 `gateway/docker-compose.yaml` runs the Gateway on the same Docker network as Open
 WebUI, Whisper and Piper (reached by container name) behind a Tailscale sidecar
-that provides HTTPS. The image also builds the LVGL web UI and serves it from the
-Gateway, so the whole client is a single `https://switchboard.<tailnet>.ts.net` URL.
+that provides HTTPS. The image also builds the web app and serves it from the
+Gateway, so the whole client is a single `https://switchboard.<tailnet>.ts.net` URL
+(the PWA at `/`, the LVGL prototype at `/lvgl/`, the plain client at `/virtual_device/`).
 
 1. `git submodule update --init`
 2. `cp gateway/.env.example gateway/.env` and fill it in (Docker network name,
@@ -127,9 +136,11 @@ Wyoming services are plain TCP (`tcp://wyoming-whisper:10300`), not HTTP.
 ### Using a tablet as the device
 
 Any tablet with a modern browser works, including an old Fire HD 8 without
-replacing its OS: sideload Fully Kiosk Browser and the Tailscale app, point the
-kiosk at the URL above and allow microphone access. The page is fullscreen,
-reconnects on its own after network drops and restores the selected persona.
+replacing its OS. Sideload the Tailscale app and a Chromium-based browser (or
+Fully Kiosk Browser), open the URL above, allow microphone access, and use
+"Add to Home screen" / install: the app is a PWA, so it then launches fullscreen
+and keeps the screen awake. It reconnects on its own after network drops and
+restores the selected persona.
 
 ## Configuration
 

@@ -1,15 +1,23 @@
 # Build context is the repo root (see docker-compose.yaml): the image needs
-# both firmware/lvgl_sim (the web UI, compiled here) and gateway/ (the
-# service that serves it). Requires `git submodule update --init` first --
+# web/ (the app), firmware/lvgl_sim (the LVGL prototype, compiled here) and
+# gateway/ (the service that serves them). Requires `git submodule update --init` first --
 # the LVGL sources are a submodule.
 
-# ---- Stage 1: compile the LVGL web UI (same toolchain as firmware/lvgl_sim/build.sh)
+# ---- Stage 1: the web app (Svelte PWA, web/)
+FROM node:22-alpine AS web-build
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+# ---- Stage 2: compile the LVGL web UI (same toolchain as firmware/lvgl_sim/build.sh)
 FROM emscripten/emsdk:6.0.9 AS sim-build
 WORKDIR /src
 COPY firmware/lvgl_sim/ ./
 RUN mkdir -p build && cd build && emcmake cmake .. && emmake make -j"$(nproc)"
 
-# ---- Stage 2: the Gateway
+# ---- Stage 3: the Gateway
 FROM python:3.12-slim
 WORKDIR /app
 
@@ -22,11 +30,12 @@ COPY gateway/switchboard ./switchboard
 COPY gateway/config ./config
 RUN pip install --no-cache-dir .
 
-# Web clients, served by the Gateway at "/" (one origin => one HTTPS
-# endpoint is enough for the tablet): the LVGL UI at /, the plain-HTML
-# virtual device at /virtual_device/.
-COPY --from=sim-build /src/build/index.html /app/static/index.html
-COPY firmware/lvgl_sim/bridge.js firmware/lvgl_sim/pcm-worklet.js /app/static/
+# Web clients, served by the Gateway (one origin => one HTTPS endpoint is
+# enough for the tablet): the PWA at /, the LVGL prototype at /lvgl/, and the
+# plain-HTML virtual device at /virtual_device/.
+COPY --from=web-build /web/dist/ /app/static/
+COPY --from=sim-build /src/build/index.html /app/static/lvgl/index.html
+COPY firmware/lvgl_sim/bridge.js firmware/lvgl_sim/pcm-worklet.js /app/static/lvgl/
 COPY gateway/client/virtual_device /app/static/virtual_device
 ENV SWITCHBOARD_STATIC_DIR=/app/static
 

@@ -28,3 +28,7 @@ firmware/lvgl_sim/build/
 
 # Chatterbox benchmark output
 scripts/chatterbox_bench/out/
+
+# Web app
+web/node_modules/
+web/dist/
