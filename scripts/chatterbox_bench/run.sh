@@ -8,6 +8,8 @@
 #
 # Output WAVs and results.json land in ./out; model weights are cached in
 # ~/.cache/huggingface. Set HF_TOKEN if Hugging Face asks for one.
+# Needs bash (arrays, pipefail); re-run under it if started with `sh run.sh`.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 cd "$(dirname "$0")"
 
