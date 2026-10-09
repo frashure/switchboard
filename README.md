@@ -169,6 +169,21 @@ curl localhost:8000/health        # from the host, or check the container logs
 - Measured on the R9700: ~2.7x real time with a ~2.1 s first chunk and ~3.4 GB VRAM. Why the shape
   bucketing and warm-up exist is in `docs/design.md`.
 
+### Signing in
+
+By default (`AUTH_MODE=owui`) people sign in with their **Open WebUI account** and see only the
+models that account may use; their chats, memory and tools are their own. Create a dedicated
+Open WebUI account for a shared tablet and grant it just the models you want there.
+
+- Set `SESSION_SECRET` (`openssl rand -hex 32`) in `gateway/.env`, otherwise everyone is signed out
+  whenever the Gateway restarts. Sessions last as long as the Open WebUI token (28 days by default),
+  so a tablet asks for the password about once a month.
+- `AUTH_MODE=none` turns login off and runs everything as the single account in `.env` (the original
+  behaviour). The plain-HTML and LVGL clients and `cli_client.py` can't sign in on their own: the CLI
+  accepts `GATEWAY_EMAIL` / `GATEWAY_PASSWORD`; the other two only work with `AUTH_MODE=none`.
+- The Gateway forwards your password to Open WebUI once at sign-in and keeps only the resulting token,
+  in an encrypted HttpOnly cookie. Run it behind HTTPS (the Tailscale setup above does).
+
 ## Configuration
 
 Settings are `SWITCHBOARD_*` environment variables or entries in `gateway/.env`
@@ -181,6 +196,8 @@ Settings are `SWITCHBOARD_*` environment variables or entries in `gateway/.env`
 | `STATIC_DIR` | Directory of web client files to serve at `/` (set in the Docker image) |
 | `LLM_REST_POLL_TIMEOUT` | How long to wait for a finished answer, default 480s |
 | `VAD_PAUSE_THRESHOLD_MS` | Silence that ends an utterance, default 1200 |
+| `AUTH_MODE` | `owui` (sign in with Open WebUI accounts, default) or `none` |
+| `SESSION_SECRET` | Encrypts the login cookie so logins survive restarts |
 | `TTS_BACKEND` | `piper` (default) or `chatterbox` (Piper remains the fallback) |
 | `CHATTERBOX_URL` | Chatterbox service address (`http://chatterbox:8000` in the compose stack) |
 
