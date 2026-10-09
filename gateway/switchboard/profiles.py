@@ -8,6 +8,7 @@ either -- only `model` (the OWUI model id) and `voice` (Piper voice,
 which OWUI has no concept of) are Gateway-side config."""
 
 import asyncio
+import logging
 import time
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from pydantic import BaseModel
 # successfully. Personas are expected to mature and change rarely once a
 # workspace is set up, so this is a low-urgency safety net (picking up a
 # newly-added/renamed persona within this window) rather than tight polling.
+logger = logging.getLogger(__name__)
+
 REFRESH_INTERVAL_S = 300
 
 
@@ -32,8 +35,30 @@ class Profile(BaseModel):
     avatar: str | None = None
 
 
+class AvatarCache:
+    """Avatars shared across users. Safe to share: a user's registry only
+    ever asks for avatars of models Open WebUI listed for *that* user."""
+
+    MISSING = object()
+
+    def __init__(self, ttl_s: float = REFRESH_INTERVAL_S, clock=time.monotonic):
+        self._ttl = ttl_s
+        self._clock = clock
+        self._items: dict[str, tuple[float, str | None]] = {}
+
+    def get(self, model_id: str):
+        item = self._items.get(model_id)
+        if item is None or self._clock() - item[0] > self._ttl:
+            return self.MISSING
+        return item[1]
+
+    def put(self, model_id: str, avatar: str | None) -> None:
+        self._items[model_id] = (self._clock(), avatar)
+
+
 class ProfileRegistry:
-    def __init__(self, voice_config: dict):
+    def __init__(self, voice_config: dict, avatars: "AvatarCache | None" = None):
+        self._avatars = avatars or AvatarCache()
         # A YAML key with nothing under it (e.g. `overrides:` with every entry
         # commented out) loads as None, not {} -- so every optional section
         # is normalised with `or`, never `.get(key, {})`.
@@ -56,10 +81,15 @@ class ProfileRegistry:
         models = [m for m in await owui.list_models() if m.get("preset")]
 
         async def fetch_avatar(model_id: str) -> str | None:
+            cached = self._avatars.get(model_id)
+            if cached is not AvatarCache.MISSING:
+                return cached
             try:
-                return await owui.get_model_avatar(model_id)
+                avatar = await owui.get_model_avatar(model_id)
             except Exception:
-                return None
+                return None  # not cached: try again next refresh
+            self._avatars.put(model_id, avatar)
+            return avatar
 
         avatars = await asyncio.gather(*(fetch_avatar(m["id"]) for m in models))
 
@@ -97,3 +127,34 @@ class ProfileRegistry:
             {"id": pid, "display_name": p.display_name, "avatar": p.avatar}
             for pid, p in self._profiles.items()
         ]
+
+
+class PersonaDirectory:
+    """One ProfileRegistry per user, since Open WebUI decides which models
+    each user may see. Voices come from the same voices.yaml for everyone."""
+
+    def __init__(self, voice_config: dict, avatars: AvatarCache | None = None):
+        self._voice_config = voice_config
+        self._avatars = avatars or AvatarCache()
+        self._registries: dict[str, ProfileRegistry] = {}
+
+    def registry_for(self, key: str) -> ProfileRegistry:
+        if key not in self._registries:
+            self._registries[key] = ProfileRegistry(self._voice_config, self._avatars)
+        return self._registries[key]
+
+    async def ensure(self, key: str, owui) -> ProfileRegistry:
+        """The user's registry, (re)loaded from Open WebUI when empty or
+        stale. Failures other than "token rejected" are logged and leave
+        whatever was loaded before (the caller retries on its next request)."""
+        from switchboard.llm.owui_client import OwuiUnauthorized
+
+        registry = self.registry_for(key)
+        if registry.needs_refresh():
+            try:
+                await registry.refresh(owui)
+            except OwuiUnauthorized:
+                raise
+            except Exception:
+                logger.exception("Failed to discover personas from Open WebUI")
+        return registry

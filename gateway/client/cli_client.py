@@ -9,6 +9,9 @@ Setup:
 
 Usage:
     python client/cli_client.py <persona_id> path/to/input.wav [more.wav ...]
+
+With AUTH_MODE=owui on the Gateway, sign in by setting GATEWAY_EMAIL and
+GATEWAY_PASSWORD (an Open WebUI account); nothing is stored.
 """
 
 import asyncio
@@ -21,6 +24,25 @@ import numpy as np
 import websockets
 
 GATEWAY_WS = os.environ.get("GATEWAY_WS", "ws://localhost:8000/ws")
+
+
+def login_cookie() -> dict:
+    """Headers carrying the session cookie, if credentials were provided."""
+    email, password = os.environ.get("GATEWAY_EMAIL"), os.environ.get("GATEWAY_PASSWORD")
+    if not (email and password):
+        return {}
+    import json
+    import urllib.request
+
+    base = GATEWAY_WS.replace("wss://", "https://").replace("ws://", "http://").rsplit("/ws", 1)[0]
+    request = urllib.request.Request(
+        f"{base}/auth/login",
+        data=json.dumps({"email": email, "password": password}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request) as response:
+        cookie = response.headers["Set-Cookie"].split(";")[0]
+    return {"Cookie": cookie}
 
 # The Gateway's /ws protocol always expects 16-bit/16kHz/mono PCM (design.md
 # Section 2/7) -- the real device resamples on-device before sending. This
@@ -85,7 +107,7 @@ async def run_turn(ws, pcm: bytes, turn_num: int) -> None:
 
 
 async def main(persona_id: str, wav_paths: list[str]) -> None:
-    async with websockets.connect(GATEWAY_WS) as ws:
+    async with websockets.connect(GATEWAY_WS, additional_headers=login_cookie()) as ws:
         await ws.send(json.dumps({"type": "select_persona", "id": persona_id}))
         for turn_num, wav_path in enumerate(wav_paths, start=1):
             pcm = load_wav_as_16k_pcm(wav_path)

@@ -9,7 +9,7 @@ from typing import Optional
 from switchboard.audio.ring import RingBuffer
 from switchboard.audio.vad import EndOfSpeechDetector
 from switchboard.config import settings
-from switchboard.llm.owui_client import OwuiClient
+from switchboard.llm.owui_client import OwuiClient, OwuiUnauthorized
 from switchboard.profiles import Profile, ProfileRegistry
 from switchboard.stt.whisper import transcribe
 from switchboard.text import split_for_speech, strip_markdown
@@ -211,6 +211,12 @@ class Session:
             if is_new_conversation:
                 title = transcript.strip()[:50]
                 asyncio.create_task(self._set_chat_title(chat_id, title))
+        except OwuiUnauthorized:
+            # The user's Open WebUI token expired or was revoked mid-session.
+            logger.info("Open WebUI rejected the user's token; asking the client to sign in again")
+            await self._emit.status("error", detail="session_expired")
+            self.state = SessionState.READY
+            return
         except Exception:
             logger.exception("LLM turn failed")
             await self._emit.status("error", detail="llm_failed")

@@ -43,6 +43,11 @@ services:
       # Wyoming is a raw TCP protocol, not HTTP.
       SWITCHBOARD_WHISPER_URI: ${WHISPER_URI:?set WHISPER_URI in .env (e.g. tcp://wyoming-whisper:10300)}
       SWITCHBOARD_PIPER_URI: ${PIPER_URI:?set PIPER_URI in .env (e.g. tcp://wyoming-piper:10200)}
+      # "owui": people sign in with their Open WebUI account and see only the models
+      # they may use (needs SESSION_SECRET so logins survive restarts). "none": no
+      # login, everything runs as the OWUI account in .env (the old behaviour).
+      SWITCHBOARD_AUTH_MODE: ${AUTH_MODE:-owui}
+      SWITCHBOARD_SESSION_SECRET: ${SESSION_SECRET:-}
       # "chatterbox" prefers the service below (falling back to Piper while it
       # warms up or if it is down); needs `--profile chatterbox` to be running.
       SWITCHBOARD_TTS_BACKEND: ${TTS_BACKEND:-piper}

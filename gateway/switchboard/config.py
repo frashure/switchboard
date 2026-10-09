@@ -57,6 +57,18 @@ class Settings(BaseSettings):
     vad_pause_threshold_ms: int = 1200
     vad_max_utterance_s: float = 15.0
 
+    # "owui": users sign in with their Open WebUI account and see only the
+    # models that account may use; chats belong to them. "none": no login --
+    # everything runs as the single service account below (the original
+    # single-device setup). Set via SWITCHBOARD_AUTH_MODE.
+    auth_mode: Literal["none", "owui"] = "owui"
+    # Encrypts the login cookie (any string; `openssl rand -hex 32`). If unset
+    # a random one is generated at startup, which logs everyone out on every
+    # restart -- set it for anything long-lived.
+    session_secret: str = ""
+    # Upper bound on a login session; also capped by the Open WebUI token's own expiry.
+    session_max_age_days: float = 28.0
+
     # Which TTS the Gateway prefers. "chatterbox" needs the services/chatterbox
     # container; Piper is always the fallback (service warming up, down, or
     # failing on an answer's first chunk) -- see tts/__init__.py.

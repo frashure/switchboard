@@ -39,13 +39,41 @@ from switchboard.profiles import Profile
 LOGIN_COOLDOWN_S = 20
 
 
+class OwuiUnauthorized(Exception):
+    """Open WebUI rejected the token (expired, revoked, or never valid)."""
+
+
 class OwuiClient:
-    def __init__(self):
-        self._token: str | None = None
+    """Talks to Open WebUI as one account.
+
+    Two modes: the *service* client logs in with the credentials in settings
+    (single-account deployments, AUTH_MODE=none); a *user-bound* client
+    (`for_token`) is handed a user's own token and never logs in itself --
+    so chats, memory, tools and model access are that user's, not a shared
+    account's."""
+
+    def __init__(self, token: str | None = None):
+        self._token: str | None = token
+        self._bound = token is not None
         self._last_login_failure: float = float("-inf")
         self._last_login_error: str = ""
 
+    @classmethod
+    def for_token(cls, token: str) -> "OwuiClient":
+        return cls(token=token)
+
+    def _check(self, response: httpx.Response) -> None:
+        """raise_for_status, but 401 becomes OwuiUnauthorized -- and a service
+        client forgets its token so the next call logs in again."""
+        if response.status_code == 401:
+            if not self._bound:
+                self._token = None
+            raise OwuiUnauthorized()
+        response.raise_for_status()
+
     async def connect(self) -> None:
+        if self._bound:
+            return  # a user's token is all there is; re-login is the user's to do
         # Observed repeatedly in this dev environment: the login call fails
         # with a transient connection error specifically during process
         # startup (uvicorn's ASGI lifespan), even though the identical
@@ -103,7 +131,7 @@ class OwuiClient:
 
         def _get() -> dict:
             r = httpx.get(f"{settings.owui_base_url}/api/models", headers=headers, timeout=10)
-            r.raise_for_status()
+            self._check(r)
             return r.json()
 
         data = await asyncio.to_thread(_get)
@@ -126,7 +154,7 @@ class OwuiClient:
                 headers=headers,
                 timeout=10,
             )
-            r.raise_for_status()
+            self._check(r)
             return r.json()
 
         data = await asyncio.to_thread(_get)
@@ -143,7 +171,7 @@ class OwuiClient:
             headers=headers,
             timeout=10,
         )
-        r.raise_for_status()
+        self._check(r)
 
     async def set_chat_title(self, chat_id: str, title: str) -> None:
         """POST /api/v1/chats/{chat_id} with the full chat object (only
@@ -158,7 +186,7 @@ class OwuiClient:
             r = httpx.get(
                 f"{settings.owui_base_url}/api/v1/chats/{chat_id}", headers=headers, timeout=10
             )
-            r.raise_for_status()
+            self._check(r)
             return r.json()
 
         def _post(chat_obj: dict) -> None:
@@ -168,7 +196,7 @@ class OwuiClient:
                 json={"chat": chat_obj},
                 timeout=10,
             )
-            r.raise_for_status()
+            self._check(r)
 
         data = await asyncio.to_thread(_get)
         chat_obj = data["chat"]
@@ -258,7 +286,7 @@ class OwuiClient:
                     json=payload,
                     timeout=30,
                 )
-                r.raise_for_status()
+                self._check(r)
                 return r.json()
 
             ack = await asyncio.to_thread(_post)
@@ -301,7 +329,7 @@ class OwuiClient:
             r = httpx.get(
                 f"{settings.owui_base_url}/api/v1/chats/{chat_id}", headers=headers, timeout=10
             )
-            r.raise_for_status()
+            self._check(r)
             return r.json()
 
         previous_length = -1
