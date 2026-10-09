@@ -17,8 +17,13 @@ GPU="${1:-rocm}"; MODEL="${2:-turbo}"; shift $(( $# >= 2 ? 2 : $# )) || true
 
 case "$GPU" in
   rocm) INDEX="https://download.pytorch.org/whl/rocm7.2"
-        RUN_FLAGS=(--device=/dev/kfd --device=/dev/dri --group-add video --group-add render
-                   --security-opt seccomp=unconfined --ipc=host) ;;
+        # Numeric host GIDs, not names: --group-add resolves names inside the
+        # container, whose /etc/group (python:slim) has no "render" group.
+        RUN_FLAGS=(--device=/dev/kfd --device=/dev/dri --security-opt seccomp=unconfined --ipc=host)
+        for grp in video render; do
+          gid="$(getent group "$grp" | cut -d: -f3 || true)"
+          [ -n "$gid" ] && RUN_FLAGS+=(--group-add "$gid")
+        done ;;
   cuda) INDEX="https://download.pytorch.org/whl/cu126"
         RUN_FLAGS=(--gpus all) ;;
   cpu)  INDEX="https://download.pytorch.org/whl/cpu"
