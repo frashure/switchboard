@@ -3,10 +3,10 @@
 # discovered dynamically from OWUI's own model list; see
 # switchboard/profiles.py and docs/design.md Section 3.
 default_voice: "en_US-lessac-medium"     # 22050 Hz -- used for any persona without an override below
-overrides:
-  phil: "en_GB-alan-low"                 # confirmed real voice, 16000 Hz
-  aida: "en_GB-alba-medium"
-  libby: "en_GB-alba-medium"
+overrides: {}
+  # phil: "en_GB-alan-low"                 # confirmed real voice, 16000 Hz
+  # aida: "en_GB-alba-medium"
+  # libby: "en_GB-alba-medium"
 
 # Chatterbox voices (only used when SWITCHBOARD_TTS_BACKEND=chatterbox).
 # Each value is the name of a reference clip -- ~10 s of clean speech saved as
@@ -14,5 +14,6 @@ overrides:
 # built-in voice. Only clone voices you have the right to use.
 chatterbox:
   default_voice: default
-  overrides: {}
-  #  phil: phil_reference      # -> services/chatterbox/voices/phil_reference.wav
+  overrides:
+    phil: "phil_ref"      # -> services/chatterbox/voices/phil_reference.wav
+    mallory: "mallory"
