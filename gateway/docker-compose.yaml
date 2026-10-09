@@ -16,6 +16,7 @@ services:
   switchboard-ts:
     image: tailscale/tailscale:latest
     hostname: switchboard
+    container_name: ts-switchboard
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}
       TS_HOSTNAME: switchboard
@@ -32,6 +33,7 @@ services:
     build:
       context: ..
       dockerfile: gateway/Dockerfile
+    container_name: switchboard
     network_mode: service:switchboard-ts
     depends_on: [switchboard-ts]
     env_file: .env
